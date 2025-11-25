@@ -1,2 +1,4 @@
-# Perigaeum-Finder
-Jahr eingeben und sehen, wann die Planeten am erdnächsten standen.
+<meta name="robots" content="noindex">
+
+# Perigaeum-Finder Quellcode
+Dies ist das Quellcode-Repository. Bitte benutzen Sie den Perigaeum-Finder auf unserer offiziellen Webseite.
