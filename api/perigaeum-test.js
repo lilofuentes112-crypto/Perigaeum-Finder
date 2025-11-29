@@ -1,8 +1,8 @@
-// API-Test mit Swiss Ephemeris (CommonJS-Version für Vercel)
+// API-Test mit Swiss Ephemeris (ESM wie beim Figurenrechner)
 
-const SwissEph = require("swisseph-wasm");
+import SwissEph from "swisseph-wasm";
 
-module.exports = async (req, res) => {
+export default async function handler(req, res) {
   try {
     const swe = new SwissEph();
     await swe.initSwissEph();
@@ -23,4 +23,4 @@ module.exports = async (req, res) => {
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e) });
   }
-};
+}
