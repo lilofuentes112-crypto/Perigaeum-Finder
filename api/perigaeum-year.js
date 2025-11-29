@@ -8,7 +8,7 @@ export default async function handler(req, res) {
     if (!year || year < 1900 || year > 2050) {
       return res.status(400).json({
         ok: false,
-        error: "Bitte ein Jahr zwischen 1900 und 2050 als ?year=YYYY angeben."
+        error: "Bitte ein Jahr zwischen 1900 und 2050 als ?year=JJJJ angeben."
       });
     }
 
@@ -29,23 +29,22 @@ export default async function handler(req, res) {
 
     const startTJD = swe.julday(year, 1, 1, 0, swe.SE_GREG_CAL);
     const endTJD = swe.julday(year + 1, 1, 1, 0, swe.SE_GREG_CAL);
-    const dayStep = 1.0;
+    const dayStep = 1.0; // 1 Tag
 
     const distanceAt = (tjd, bodyId) => {
       const r = swe.calc_ut(tjd, bodyId, swe.SEFLG_SWIEPH);
-      return r[2];
+      return r[2]; // Distanz in AU (nur intern für Minimumsuche)
     };
 
-    const formatDate = (tjd) => {
-      const [y, m, d, hour] = swe.revjul(tjd, swe.SE_GREG_CAL);
-      const hh = Math.floor(hour);
-      const mm = Math.round((hour - hh) * 60);
+    // Nur Datum, deutsches Format: TT.MM.JJJJ
+    const formatDateDE = (tjd) => {
+      const [y, m, d] = swe.revjul(tjd, swe.SE_GREG_CAL);
       const pad = (n) => (n < 10 ? "0" + n : "" + n);
-      return `${y}-${pad(m)}-${pad(d)} ${pad(hh)}:${pad(mm)} UT`;
+      return `${pad(d)}.${pad(m)}.${y}`;
     };
 
     const refineMinimum = (tCenter, bodyId) => {
-      const hourStep = 1 / 24;
+      const hourStep = 1 / 24; // 1 Stunde
       let bestT = tCenter;
       let bestD = distanceAt(tCenter, bodyId);
 
@@ -56,7 +55,7 @@ export default async function handler(req, res) {
           bestT = t;
         }
       }
-      return { tjd: bestT, distance_au: bestD };
+      return bestT;
     };
 
     const resultsPerBody = [];
@@ -68,7 +67,7 @@ export default async function handler(req, res) {
         resultsPerBody.push({
           body: body.name,
           perigees: [],
-          info: "Konstante nicht gefunden"
+          info: "Konstante für diesen Körper nicht gefunden"
         });
         continue;
       }
@@ -84,12 +83,11 @@ export default async function handler(req, res) {
         const prevPrev = samples[i - 2];
         const prev = samples[i - 1];
         const curr = samples[i];
+
         if (prev.d < prevPrev.d && prev.d < curr.d) {
-          const refined = refineMinimum(prev.tjd, bodyId);
+          const tMin = refineMinimum(prev.tjd, bodyId);
           perigees.push({
-            jd: refined.tjd,
-            date_ut: formatDate(refined.tjd),
-            distance_au: refined.distance_au
+            datum: formatDateDE(tMin)
           });
         }
       }
