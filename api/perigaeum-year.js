@@ -1,5 +1,5 @@
 // api/perigaeum-year.js
-// Jahres-Perigäum-Suche für mehrere Himmelskörper (nur Datum, deutsch)
+// Jahres-Perigäum-Suche für Sonne + mehrere Planeten (nur Datum, deutsch)
 
 import SwissEph from "swisseph-wasm";
 
@@ -16,9 +16,24 @@ const BODIES = [
   { id: "SE_PLUTO",   name: "Pluto" }
 ];
 
+// einfache CORS-Unterstützung
+function setCorsHeaders(req, res) {
+  const origin = req.headers.origin || "";
+  // ggf. einschränken auf astrogypsy.de – fürs Erste offen:
+  res.setHeader("Access-Control-Allow-Origin", origin || "*");
+  res.setHeader("Vary", "Origin");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Accept"
+  );
+  res.setHeader(
+    "Access-Control-Allow-Methods",
+    "GET, POST, OPTIONS"
+  );
+}
+
 // Julianisches Datum -> gregorianisches Kalenderdatum (UTC), nur Tag
 function jdToCalendar(jd) {
-  // Standard-Algorithmus (für astronomische Julian Dates)
   const Z = Math.floor(jd + 0.5);
   const F = jd + 0.5 - Z;
 
@@ -54,6 +69,14 @@ function formatDateDE({ year, month, day }) {
 }
 
 export default async function handler(req, res) {
+  // CORS-Header immer setzen
+  setCorsHeaders(req, res);
+
+  // Preflight (OPTIONS) abhandeln
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
+
   const swe = new SwissEph();
 
   try {
@@ -111,7 +134,7 @@ export default async function handler(req, res) {
         results.push({
           body: body.name,
           perigees: [],
-          info: "kein Perigäum in diesem Jahr"
+          info: "Kein Perigäum in diesem Jahr"
         });
       } else {
         totalCount += perigees.length;
