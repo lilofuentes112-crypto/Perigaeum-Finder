@@ -2,7 +2,7 @@
 <html lang="de">
 <head>
   <meta charset="utf-8" />
-  <title>Perigäum-Rechner</title>
+  <title>Mond – Perigäum & Apogäum</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
     :root {
@@ -29,26 +29,26 @@
       -webkit-font-smoothing: antialiased;
     }
 
-    /* Kein 100vh-Layout, damit im iFrame kein eigener Scrollbalken entsteht */
     .page {
-      width: 100%;
+      min-height: 100vh;
+      display: flex;
+      justify-content: center;
       padding: 16px;
     }
 
     .wrapper {
       width: 100%;
-      max-width: 800px;
-      margin: 0 auto;
+      max-width: 820px;
       background: linear-gradient(145deg, #050505, #101010);
       border-radius: 18px;
       border: 1px solid var(--copper-dark);
       box-shadow: 0 0 30px rgba(0, 0, 0, 0.7);
-      padding: 18px 16px 20px;
+      padding: 18px 16px 22px;
     }
 
     @media (min-width: 640px) {
       .wrapper {
-        padding: 22px 24px 24px;
+        padding: 22px 24px 26px;
       }
     }
 
@@ -68,6 +68,10 @@
       color: var(--copper-soft);
     }
 
+    .subtitle span {
+      font-weight: 600;
+    }
+
     .form-row {
       display: flex;
       flex-wrap: wrap;
@@ -82,10 +86,11 @@
       color: var(--copper-soft);
     }
 
-    .controls {
+    .input-row {
       display: flex;
       flex: 1 1 100%;
       gap: 10px;
+      align-items: center;
     }
 
     input[type="number"] {
@@ -162,38 +167,44 @@
       color: var(--copper-soft);
     }
 
-    .results {
+    .results-grid {
       margin-top: 8px;
       display: grid;
-      grid-template-columns: 1fr;
-      gap: 8px;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
     }
 
-    @media (min-width: 640px) {
-      .results {
-        gap: 10px;
+    @media (max-width: 640px) {
+      .results-grid {
+        grid-template-columns: 1fr;
       }
     }
 
-    .planet-card {
+    .column-card {
       background: var(--bg-card);
       border-radius: 12px;
       border: 1px solid #262626;
-      padding: 10px 12px;
+      padding: 10px 12px 12px;
     }
 
-    .planet-header {
+    .col-header {
       display: flex;
       justify-content: space-between;
       align-items: baseline;
-      margin-bottom: 4px;
+      margin-bottom: 6px;
       gap: 6px;
     }
 
-    .planet-name {
+    .col-title {
       font-size: 1rem;
       font-weight: 600;
       color: var(--copper);
+    }
+
+    .col-sub {
+      font-size: 0.78rem;
+      color: var(--copper-soft);
+      margin-bottom: 4px;
     }
 
     .count-badge {
@@ -206,40 +217,55 @@
       white-space: nowrap;
     }
 
-    .dates {
+    .dates-list {
       font-size: 0.85rem;
       color: var(--copper-soft);
+      list-style: none;
+      padding: 0;
+      margin: 0;
     }
 
-    .dates span {
-      display: inline-block;
-      margin-right: 10px;
-      margin-bottom: 2px;
+    .dates-list li {
+      padding: 2px 0;
     }
 
-    .no-peri {
+    .no-items {
       font-size: 0.85rem;
       color: #888888;
       font-style: italic;
     }
 
     .total-info {
-      margin-top: 4px;
+      margin-top: 6px;
       font-size: 0.85rem;
       color: var(--copper-soft);
       text-align: right;
     }
 
-    /* NEU: Handy-Optimierung für sehr schmale Displays */
-    @media (max-width: 400px) {
-      .controls {
+    .copyright {
+      margin-top: 16px;
+      font-size: 0.78rem;
+      color: #a37a45;
+      text-align: center;
+      line-height: 1.5;
+    }
+
+    /* Mobile-Layout: Button unter das Feld */
+    @media (max-width: 520px) {
+      .input-row {
         flex-direction: column;
-        align-items: stretch;
+        gap: 10px;
+        width: 100%;
       }
 
-      button {
+      .input-row input {
         width: 100%;
-        text-align: center;
+      }
+
+      .input-row button {
+        width: 100%;
+        display: block;
+        margin: 0;
       }
     }
   </style>
@@ -247,49 +273,62 @@
 <body>
   <div class="page">
     <div class="wrapper">
-      <h1>Perigäum-Rechner</h1>
+      <h1>Mond – Perigäum &amp; Apogäum</h1>
       <p class="subtitle">
-        Jahr eingeben und sehen, wann Sonne und die Planeten von Merkur bis Pluto im Perigäum sind.
+        Jahr eingeben und alle <span>Perigäen</span> (erdnächster Punkt) und
+        <span>Apogäen</span> (erdfernster Punkt) des Mondes sehen.
       </p>
 
-      <form id="periForm">
+      <form id="moonForm">
         <div class="form-row">
           <label for="year">
             Jahr (1900–2050)
           </label>
-          <div class="controls">
+          <div class="input-row">
             <input
               id="year"
               name="year"
               type="number"
               min="1900"
               max="2050"
-              placeholder="z.&nbsp;B. 2000"
+              placeholder="z.&nbsp;B. 1965"
               required
             />
             <button type="submit" id="submitBtn">Berechnen</button>
           </div>
         </div>
         <div class="hint">
-          Hinweis: Alle Daten beziehen sich auf die Entfernung zur Erde
-          (Perigäum). Zeiten werden auf den entsprechenden Tag gerundet.
+          Hinweis: Alle Daten beziehen sich auf die Entfernung des Mondes zur Erde.
+          Perigäum = erdnächster Punkt, Apogäum = erdfernster Punkt.
         </div>
       </form>
 
       <div id="status" class="status"></div>
 
-      <div id="results" class="results"></div>
+      <div class="results-grid" id="resultsGrid">
+        <!-- Perigäen / Apogäen werden hier eingefügt -->
+      </div>
+
       <div id="totalInfo" class="total-info"></div>
+
+      <div class="copyright">
+        © Astrogypsy – urheberrechtlich geschützt.<br />
+        Backend-API nur für <strong>astrogypsy.de</strong> freigegeben.
+        Unbefugte Einbettung oder Nutzung ist untersagt.
+      </div>
     </div>
   </div>
 
   <script>
-    const form = document.getElementById("periForm");
+    const form = document.getElementById("moonForm");
     const yearInput = document.getElementById("year");
     const submitBtn = document.getElementById("submitBtn");
     const statusEl = document.getElementById("status");
-    const resultsEl = document.getElementById("results");
+    const resultsGrid = document.getElementById("resultsGrid");
     const totalInfoEl = document.getElementById("totalInfo");
+
+    // Auf Vercel direkt können wir relative Pfade nutzen
+    const API_URL = "/api/moon-perigee-apogee-year";
 
     function setStatus(message, type) {
       statusEl.textContent = message || "";
@@ -297,69 +336,96 @@
     }
 
     function clearResults() {
-      resultsEl.innerHTML = "";
+      resultsGrid.innerHTML = "";
       totalInfoEl.textContent = "";
+    }
+
+    function renderColumn(title, subtitle, items, count, emptyText) {
+      const card = document.createElement("div");
+      card.className = "column-card";
+
+      const header = document.createElement("div");
+      header.className = "col-header";
+
+      const titleEl = document.createElement("div");
+      titleEl.className = "col-title";
+      titleEl.textContent = title;
+
+      const countEl = document.createElement("div");
+      countEl.className = "count-badge";
+      countEl.textContent =
+        count === 1 ? "1 Termin" : count + " Termine";
+
+      header.appendChild(titleEl);
+      header.appendChild(countEl);
+      card.appendChild(header);
+
+      const sub = document.createElement("div");
+      sub.className = "col-sub";
+      sub.textContent = subtitle;
+      card.appendChild(sub);
+
+      if (count > 0 && Array.isArray(items) && items.length > 0) {
+        const ul = document.createElement("ul");
+        ul.className = "dates-list";
+
+        items.forEach((p) => {
+          const li = document.createElement("li");
+          li.textContent = p.datum;
+          ul.appendChild(li);
+        });
+
+        card.appendChild(ul);
+      } else {
+        const info = document.createElement("div");
+        info.className = "no-items";
+        info.textContent = emptyText;
+        card.appendChild(info);
+      }
+
+      return card;
     }
 
     function renderResults(data) {
       clearResults();
 
-      if (!data || !Array.isArray(data.bodies)) {
+      if (!data || !Array.isArray(data.perigees) || !Array.isArray(data.apogees)) {
         setStatus("Unerwartete Antwort vom Server.", "error");
         return;
       }
 
-      data.bodies.forEach((body) => {
-        const card = document.createElement("div");
-        card.className = "planet-card";
+      const perCount = data.counts && typeof data.counts.perigee === "number"
+        ? data.counts.perigee
+        : data.perigees.length;
 
-        const header = document.createElement("div");
-        header.className = "planet-header";
+      const apoCount = data.counts && typeof data.counts.apogee === "number"
+        ? data.counts.apogee
+        : data.apogees.length;
 
-        const nameEl = document.createElement("div");
-        nameEl.className = "planet-name";
-        nameEl.textContent = body.body || "";
+      const perCard = renderColumn(
+        "Perigäen",
+        "Erdnächster Punkt des Mondes",
+        data.perigees,
+        perCount,
+        "Kein Perigäum in diesem Jahr."
+      );
 
-        const countEl = document.createElement("div");
-        countEl.className = "count-badge";
-        const count = Array.isArray(body.perigees)
-          ? body.perigees.length
-          : 0;
-        countEl.textContent =
-          count === 1 ? "1 Termin" : count + " Termine";
+      const apoCard = renderColumn(
+        "Apogäen",
+        "Erdfernster Punkt des Mondes",
+        data.apogees,
+        apoCount,
+        "Kein Apogäum in diesem Jahr."
+      );
 
-        header.appendChild(nameEl);
-        header.appendChild(countEl);
-        card.appendChild(header);
+      resultsGrid.appendChild(perCard);
+      resultsGrid.appendChild(apoCard);
 
-        if (count > 0) {
-          const datesWrap = document.createElement("div");
-          datesWrap.className = "dates";
-
-          body.perigees.forEach((p) => {
-            const span = document.createElement("span");
-            span.textContent = p.datum;
-            datesWrap.appendChild(span);
-          });
-
-          card.appendChild(datesWrap);
-        } else {
-          const info = document.createElement("div");
-          info.className = "no-peri";
-          info.textContent =
-            body.info || "Kein Perigäum in diesem Jahr";
-          card.appendChild(info);
-        }
-
-        resultsEl.appendChild(card);
-      });
-
-      if (typeof data.totalCount === "number") {
-        totalInfoEl.textContent =
-          data.totalCount === 1
-            ? "Insgesamt 1 Perigäum in diesem Jahr."
-            : `Insgesamt ${data.totalCount} Perigäen in diesem Jahr.`;
-      }
+      const total = perCount + apoCount;
+      totalInfoEl.textContent =
+        total === 1
+          ? "Insgesamt 1 Ereignis (Perigäum oder Apogäum) in diesem Jahr."
+          : `Insgesamt ${total} Ereignisse (Perigäen + Apogäen) in diesem Jahr.`;
     }
 
     form.addEventListener("submit", async (event) => {
@@ -376,12 +442,20 @@
       }
 
       submitBtn.disabled = true;
-      setStatus("Berechne Perigäen …", "ok");
+      setStatus("Berechne Mond-Perigäen und -Apogäen …", "ok");
 
       try {
         const response = await fetch(
-          `/api/perigaeum-year?year=${encodeURIComponent(year)}`
+          `${API_URL}?year=${encodeURIComponent(year)}`,
+          {
+            method: "GET",
+            headers: {
+              "Accept": "application/json"
+            },
+            cache: "no-store"
+          }
         );
+
         const data = await response.json();
 
         if (!response.ok || !data.ok) {
@@ -406,5 +480,4 @@
   </script>
 </body>
 </html>
-
 
