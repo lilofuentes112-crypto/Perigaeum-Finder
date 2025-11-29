@@ -38,7 +38,10 @@ export default async function handler(req, res) {
 
     // Nur Datum, deutsches Format: TT.MM.JJJJ
     const formatDateDE = (tjd) => {
-      const [y, m, d] = swe.revjul(tjd, swe.SE_GREG_CAL);
+      const rev = swe.revjul(tjd, swe.SE_GREG_CAL);
+      const y = rev.year;
+      const m = rev.month;
+      const d = rev.day;
       const pad = (n) => (n < 10 ? "0" + n : "" + n);
       return `${pad(d)}.${pad(m)}.${y}`;
     };
