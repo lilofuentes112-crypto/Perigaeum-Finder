@@ -29,16 +29,17 @@
       -webkit-font-smoothing: antialiased;
     }
 
+    /* Anpassung: keine 100vh-Mindesthöhe, kein Flex-Center,
+       damit im iFrame kein eigener Scrollbalken entsteht */
     .page {
-      min-height: 100vh;
-      display: flex;
-      justify-content: center;
+      width: 100%;
       padding: 16px;
     }
 
     .wrapper {
       width: 100%;
       max-width: 800px;
+      margin: 0 auto; /* mittig zentriert, aber normales Block-Layout */
       background: linear-gradient(145deg, #050505, #101010);
       border-radius: 18px;
       border: 1px solid var(--copper-dark);
