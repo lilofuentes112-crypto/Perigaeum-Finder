@@ -2,6 +2,7 @@
   "name": "perigaeum-finder",
   "version": "1.0.0",
   "private": true,
+  "type": "module",
   "dependencies": {
     "swisseph-wasm": "latest"
   }
