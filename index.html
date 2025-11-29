@@ -1,0 +1,395 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <title>Perigäum-Rechner</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root {
+      --bg: #000000;
+      --bg-card: #111111;
+      --copper: #d9a066;
+      --copper-soft: #c4915a;
+      --copper-dark: #8a5e30;
+      --error: #ff6666;
+      --font-main: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+        sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      padding: 0;
+      background: radial-gradient(circle at top, #222222 0, #000000 55%);
+      color: var(--copper);
+      font-family: var(--font-main);
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .page {
+      min-height: 100vh;
+      display: flex;
+      justify-content: center;
+      padding: 16px;
+    }
+
+    .wrapper {
+      width: 100%;
+      max-width: 800px;
+      background: linear-gradient(145deg, #050505, #101010);
+      border-radius: 18px;
+      border: 1px solid var(--copper-dark);
+      box-shadow: 0 0 30px rgba(0, 0, 0, 0.7);
+      padding: 18px 16px 20px;
+    }
+
+    @media (min-width: 640px) {
+      .wrapper {
+        padding: 22px 24px 24px;
+      }
+    }
+
+    h1 {
+      margin: 0 0 6px;
+      font-size: 1.6rem;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--copper);
+      text-align: center;
+    }
+
+    .subtitle {
+      margin: 0 0 18px;
+      font-size: 0.9rem;
+      text-align: center;
+      color: var(--copper-soft);
+    }
+
+    .form-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+
+    label {
+      font-size: 0.9rem;
+      flex: 1 1 100%;
+      color: var(--copper-soft);
+    }
+
+    .controls {
+      display: flex;
+      flex: 1 1 100%;
+      gap: 10px;
+    }
+
+    input[type="number"] {
+      flex: 1 1 0;
+      min-width: 0;
+      background: #050505;
+      border: 1px solid var(--copper-dark);
+      border-radius: 999px;
+      padding: 8px 12px;
+      color: var(--copper);
+      font-size: 0.95rem;
+      outline: none;
+    }
+
+    input[type="number"]::placeholder {
+      color: #555555;
+    }
+
+    input[type="number"]:focus {
+      border-color: var(--copper);
+      box-shadow: 0 0 0 1px rgba(217, 160, 102, 0.3);
+    }
+
+    button {
+      flex: 0 0 auto;
+      padding: 8px 16px;
+      border-radius: 999px;
+      border: 1px solid var(--copper);
+      background: radial-gradient(circle at top, #2b1a0a, #120a05);
+      color: var(--copper);
+      font-size: 0.95rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      cursor: pointer;
+      transition: background 0.15s ease, transform 0.08s ease,
+        box-shadow 0.15s ease;
+      white-space: nowrap;
+    }
+
+    button:hover {
+      background: radial-gradient(circle at top, #3a2512, #181008);
+      transform: translateY(-1px);
+      box-shadow: 0 0 10px rgba(217, 160, 102, 0.5);
+    }
+
+    button:active {
+      transform: translateY(0);
+      box-shadow: none;
+    }
+
+    button:disabled {
+      opacity: 0.6;
+      cursor: default;
+      box-shadow: none;
+    }
+
+    .hint {
+      font-size: 0.78rem;
+      color: #777777;
+      margin-bottom: 10px;
+    }
+
+    .status {
+      font-size: 0.85rem;
+      margin-bottom: 10px;
+      min-height: 1.2em;
+    }
+
+    .status.error {
+      color: var(--error);
+    }
+
+    .status.ok {
+      color: var(--copper-soft);
+    }
+
+    .results {
+      margin-top: 8px;
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 8px;
+    }
+
+    @media (min-width: 640px) {
+      .results {
+        gap: 10px;
+      }
+    }
+
+    .planet-card {
+      background: var(--bg-card);
+      border-radius: 12px;
+      border: 1px solid #262626;
+      padding: 10px 12px;
+    }
+
+    .planet-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      margin-bottom: 4px;
+      gap: 6px;
+    }
+
+    .planet-name {
+      font-size: 1rem;
+      font-weight: 600;
+      color: var(--copper);
+    }
+
+    .count-badge {
+      font-size: 0.75rem;
+      padding: 2px 10px;
+      border-radius: 999px;
+      border: 1px solid #333333;
+      color: var(--copper-soft);
+      background: rgba(255, 255, 255, 0.02);
+      white-space: nowrap;
+    }
+
+    .dates {
+      font-size: 0.85rem;
+      color: var(--copper-soft);
+    }
+
+    .dates span {
+      display: inline-block;
+      margin-right: 10px;
+      margin-bottom: 2px;
+    }
+
+    .no-peri {
+      font-size: 0.85rem;
+      color: #888888;
+      font-style: italic;
+    }
+
+    .total-info {
+      margin-top: 4px;
+      font-size: 0.85rem;
+      color: var(--copper-soft);
+      text-align: right;
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <div class="wrapper">
+      <h1>Perigäum-Rechner</h1>
+      <p class="subtitle">
+        Jahr eingeben und sehen, wann Merkur&nbsp;– Pluto im Perigäum standen.
+      </p>
+
+      <form id="periForm">
+        <div class="form-row">
+          <label for="year">
+            Jahr (1900–2050)
+          </label>
+          <div class="controls">
+            <input
+              id="year"
+              name="year"
+              type="number"
+              min="1900"
+              max="2050"
+              placeholder="z.&nbsp;B. 2000"
+              required
+            />
+            <button type="submit" id="submitBtn">Berechnen</button>
+          </div>
+        </div>
+        <div class="hint">
+          Hinweis: Alle Daten beziehen sich auf die Entfernung zur Erde
+          (Perigäum). Zeiten werden auf den entsprechenden Tag gerundet.
+        </div>
+      </form>
+
+      <div id="status" class="status"></div>
+
+      <div id="results" class="results"></div>
+      <div id="totalInfo" class="total-info"></div>
+    </div>
+  </div>
+
+  <script>
+    const form = document.getElementById("periForm");
+    const yearInput = document.getElementById("year");
+    const submitBtn = document.getElementById("submitBtn");
+    const statusEl = document.getElementById("status");
+    const resultsEl = document.getElementById("results");
+    const totalInfoEl = document.getElementById("totalInfo");
+
+    function setStatus(message, type) {
+      statusEl.textContent = message || "";
+      statusEl.className = "status" + (type ? " " + type : "");
+    }
+
+    function clearResults() {
+      resultsEl.innerHTML = "";
+      totalInfoEl.textContent = "";
+    }
+
+    function renderResults(data) {
+      clearResults();
+
+      if (!data || !Array.isArray(data.bodies)) {
+        setStatus("Unerwartete Antwort vom Server.", "error");
+        return;
+      }
+
+      data.bodies.forEach((body) => {
+        const card = document.createElement("div");
+        card.className = "planet-card";
+
+        const header = document.createElement("div");
+        header.className = "planet-header";
+
+        const nameEl = document.createElement("div");
+        nameEl.className = "planet-name";
+        nameEl.textContent = body.body || "";
+
+        const countEl = document.createElement("div");
+        countEl.className = "count-badge";
+        const count = Array.isArray(body.perigees)
+          ? body.perigees.length
+          : 0;
+        countEl.textContent =
+          count === 1 ? "1 Termin" : count + " Termine";
+
+        header.appendChild(nameEl);
+        header.appendChild(countEl);
+        card.appendChild(header);
+
+        if (count > 0) {
+          const datesWrap = document.createElement("div");
+          datesWrap.className = "dates";
+
+          body.perigees.forEach((p) => {
+            const span = document.createElement("span");
+            span.textContent = p.datum;
+            datesWrap.appendChild(span);
+          });
+
+          card.appendChild(datesWrap);
+        } else {
+          const info = document.createElement("div");
+          info.className = "no-peri";
+          info.textContent =
+            body.info || "Kein Perigäum in diesem Jahr";
+          card.appendChild(info);
+        }
+
+        resultsEl.appendChild(card);
+      });
+
+      if (typeof data.totalCount === "number") {
+        totalInfoEl.textContent =
+          data.totalCount === 1
+            ? "Insgesamt 1 Perigäum in diesem Jahr."
+            : `Insgesamt ${data.totalCount} Perigäen in diesem Jahr.`;
+      }
+    }
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      clearResults();
+
+      const year = parseInt(yearInput.value, 10);
+      if (!year || year < 1900 || year > 2050) {
+        setStatus(
+          "Bitte ein gültiges Jahr zwischen 1900 und 2050 eingeben.",
+          "error"
+        );
+        return;
+      }
+
+      submitBtn.disabled = true;
+      setStatus("Berechne Perigäen …", "ok");
+
+      try {
+        const response = await fetch(
+          `/api/perigaeum-year?year=${encodeURIComponent(year)}`
+        );
+        const data = await response.json();
+
+        if (!response.ok || !data.ok) {
+          setStatus(
+            data && data.error
+              ? data.error
+              : "Fehler bei der Berechnung.",
+            "error"
+          );
+          return;
+        }
+
+        setStatus("", "");
+        renderResults(data);
+      } catch (err) {
+        console.error(err);
+        setStatus("Netzwerkfehler – bitte später erneut versuchen.", "error");
+      } finally {
+        submitBtn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>
