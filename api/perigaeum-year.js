@@ -1,119 +1,144 @@
+// api/perigaeum-year.js
+// Jahres-Perigäum-Suche für mehrere Planeten (nur Datum, deutsch)
+
 import SwissEph from "swisseph-wasm";
 
+const BODIES = [
+  { id: "SE_MERCURY", name: "Merkur" },
+  { id: "SE_VENUS",   name: "Venus" },
+  { id: "SE_MARS",    name: "Mars" },
+  { id: "SE_JUPITER", name: "Jupiter" },
+  { id: "SE_SATURN",  name: "Saturn" },
+  { id: "SE_CHIRON",  name: "Chiron" },
+  { id: "SE_URANUS",  name: "Uranus" },
+  { id: "SE_NEPTUNE", name: "Neptun" },
+  { id: "SE_PLUTO",   name: "Pluto" }
+];
+
+// Julianisches Datum -> gregorianisches Kalenderdatum (UTC), nur Tag
+function jdToCalendar(jd) {
+  // Standard-Algorithmus (für astronomische Julian Dates)
+  const Z = Math.floor(jd + 0.5);
+  const F = jd + 0.5 - Z;
+
+  let A = Z;
+  if (Z >= 2299161) {
+    const alpha = Math.floor((Z - 1867216.25) / 36524.25);
+    A = Z + 1 + alpha - Math.floor(alpha / 4);
+  }
+
+  const B = A + 1524;
+  const C = Math.floor((B - 122.1) / 365.25);
+  const D = Math.floor(365.25 * C);
+  const E = Math.floor((B - D) / 30.6001);
+
+  const dayFloat = B - D - Math.floor(30.6001 * E) + F;
+  const day = Math.floor(dayFloat + 1e-6); // runden
+
+  let month;
+  if (E < 14) month = E - 1;
+  else month = E - 13;
+
+  let year;
+  if (month > 2) year = C - 4716;
+  else year = C - 4715;
+
+  return { year, month, day };
+}
+
+function formatDateDE({ year, month, day }) {
+  const dd = day.toString().padStart(2, "0");
+  const mm = month.toString().padStart(2, "0");
+  return `${dd}.${mm}.${year}`;
+}
+
 export default async function handler(req, res) {
+  const swe = new SwissEph();
+
   try {
-    const yearParam = req.query?.year || req.query?.Year || req.query?.jahr;
+    const yearParam =
+      (req.method === "GET" ? req.query.year : req.body?.year) ?? "";
     const year = parseInt(yearParam, 10);
 
-    if (!year || year < 1900 || year > 2050) {
+    if (!Number.isFinite(year) || year < 1900 || year > 2050) {
       return res.status(400).json({
         ok: false,
-        error: "Bitte ein Jahr zwischen 1900 und 2050 als ?year=JJJJ angeben."
+        error: "Bitte ein Jahr zwischen 1900 und 2050 angeben."
       });
     }
 
-    const swe = new SwissEph();
     await swe.initSwissEph();
 
-    const bodies = [
-      { name: "Merkur", code: "SE_MERCURY" },
-      { name: "Venus", code: "SE_VENUS" },
-      { name: "Mars", code: "SE_MARS" },
-      { name: "Jupiter", code: "SE_JUPITER" },
-      { name: "Saturn", code: "SE_SATURN" },
-      { name: "Chiron", code: "SE_CHIRON" },
-      { name: "Uranus", code: "SE_URANUS" },
-      { name: "Neptun", code: "SE_NEPTUNE" },
-      { name: "Pluto", code: "SE_PLUTO" }
-    ];
+    // Start-JD des Jahres (1. Januar, 00:00 UT)
+    const jdStart = swe.julday(year, 1, 1, 0.0);
+    // wir gehen etwas über das Jahresende hinaus
+    const jdEnd = swe.julday(year + 1, 1, 2, 0.0);
+    const days = Math.floor(jdEnd - jdStart);
 
-    const startTJD = swe.julday(year, 1, 1, 0, swe.SE_GREG_CAL);
-    const endTJD = swe.julday(year + 1, 1, 1, 0, swe.SE_GREG_CAL);
-    const dayStep = 1.0; // 1 Tag
+    const results = [];
+    let totalCount = 0;
 
-    const distanceAt = (tjd, bodyId) => {
-      const r = swe.calc_ut(tjd, bodyId, swe.SEFLG_SWIEPH);
-      return r[2]; // Distanz in AU (nur intern für Minimumsuche)
-    };
-
-    // Nur Datum, deutsches Format: TT.MM.JJJJ
-    const formatDateDE = (tjd) => {
-      const rev = swe.revjul(tjd, swe.SE_GREG_CAL);
-      const y = rev.year;
-      const m = rev.month;
-      const d = rev.day;
-      const pad = (n) => (n < 10 ? "0" + n : "" + n);
-      return `${pad(d)}.${pad(m)}.${y}`;
-    };
-
-    const refineMinimum = (tCenter, bodyId) => {
-      const hourStep = 1 / 24; // 1 Stunde
-      let bestT = tCenter;
-      let bestD = distanceAt(tCenter, bodyId);
-
-      for (let t = tCenter - 1; t <= tCenter + 1; t += hourStep) {
-        const d = distanceAt(t, bodyId);
-        if (d < bestD) {
-          bestD = d;
-          bestT = t;
-        }
-      }
-      return bestT;
-    };
-
-    const resultsPerBody = [];
-
-    for (const body of bodies) {
-      const bodyId = swe[body.code];
-
-      if (typeof bodyId !== "number") {
-        resultsPerBody.push({
-          body: body.name,
-          perigees: [],
-          info: "Konstante für diesen Körper nicht gefunden"
-        });
-        continue;
-      }
-
-      const samples = [];
-      for (let t = startTJD; t <= endTJD; t += dayStep) {
-        samples.push({ tjd: t, d: distanceAt(t, bodyId) });
-      }
-
+    for (const body of BODIES) {
+      const bodyId = swe[body.id];
       const perigees = [];
 
-      for (let i = 2; i < samples.length; i++) {
-        const prevPrev = samples[i - 2];
-        const prev = samples[i - 1];
-        const curr = samples[i];
+      let prevDist = null;
+      let prevTrend = null; // -1 fallend, +1 steigend
 
-        if (prev.d < prevPrev.d && prev.d < curr.d) {
-          const tMin = refineMinimum(prev.tjd, bodyId);
-          perigees.push({
-            datum: formatDateDE(tMin)
-          });
+      for (let i = 0; i <= days; i++) {
+        const jd = jdStart + i;
+        const pos = swe.calc_ut(jd, bodyId, swe.SEFLG_SWIEPH);
+        const dist = pos[2]; // Distanz in AU
+
+        if (prevDist !== null) {
+          const trend = dist > prevDist ? +1 : -1;
+
+          // Minimum, wenn Trend von fallend (-1) auf steigend (+1) wechselt
+          if (prevTrend === -1 && trend === +1) {
+            const perigeeJd = jd - 1; // Minimum liegt näher am vorherigen Tag
+            const cal = jdToCalendar(perigeeJd);
+            perigees.push({ datum: formatDateDE(cal) });
+          }
+
+          prevTrend = trend;
         }
+
+        prevDist = dist;
       }
 
-      resultsPerBody.push({
-        body: body.name,
-        perigees,
-        info: perigees.length === 0 ? "kein Perigäum in diesem Jahr" : null
-      });
+      if (perigees.length === 0) {
+        results.push({
+          body: body.name,
+          perigees: [],
+          info: "Kein Perigäum in diesem Jahr"
+        });
+      } else {
+        totalCount += perigees.length;
+        results.push({
+          body: body.name,
+          perigees,
+          info: null
+        });
+      }
     }
-
-    const totalCount = resultsPerBody.reduce(
-      (sum, b) => sum + b.perigees.length,
-      0
-    );
 
     return res.status(200).json({
       ok: true,
       year,
       totalCount,
-      bodies: resultsPerBody
+      bodies: results
     });
   } catch (e) {
-    return res.status(500).json({ ok: false, error: String(e) });
+    console.error("Perigäum-Fehler:", e);
+    return res.status(500).json({
+      ok: false,
+      error: String(e)
+    });
+  } finally {
+    try {
+      swe.close();
+    } catch (_) {
+      // ignorieren
+    }
   }
 }
