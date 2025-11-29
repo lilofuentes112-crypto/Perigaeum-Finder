@@ -1,9 +1,10 @@
 // api/perigaeum-year.js
-// Jahres-Perigäum-Suche für mehrere Planeten (nur Datum, deutsch)
+// Jahres-Perigäum-Suche für mehrere Himmelskörper (nur Datum, deutsch)
 
 import SwissEph from "swisseph-wasm";
 
 const BODIES = [
+  { id: "SE_SUN",     name: "Sonne" },
   { id: "SE_MERCURY", name: "Merkur" },
   { id: "SE_VENUS",   name: "Venus" },
   { id: "SE_MARS",    name: "Mars" },
@@ -110,7 +111,7 @@ export default async function handler(req, res) {
         results.push({
           body: body.name,
           perigees: [],
-          info: "Kein Perigäum in diesem Jahr"
+          info: "kein Perigäum in diesem Jahr"
         });
       } else {
         totalCount += perigees.length;
