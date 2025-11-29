@@ -1,8 +1,8 @@
-// API-Test mit Swiss Ephemeris (Goldstandard-Block)
+// API-Test mit Swiss Ephemeris (CommonJS-Version für Vercel)
 
-import SwissEph from "swisseph-wasm";
+const SwissEph = require("swisseph-wasm");
 
-export default async function handler(req, res) {
+module.exports = async (req, res) => {
   try {
     const swe = new SwissEph();
     await swe.initSwissEph();
@@ -23,4 +23,4 @@ export default async function handler(req, res) {
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e) });
   }
-}
+};
