@@ -1,10 +1,8 @@
 // api/perigaeum-year.js
 // Jahres-Perigäum-Rechner (Datum, deutsch, UTC)
-// - Sonne: Erd-Perihel (Minimum der Sonnen-Distanz) im Jahr (kein Retro-Filter)
-// - Merkur–Pluto + Chiron: Perigäum = Distanz-Minimum innerhalb JEDER rückläufigen Phase
-//   (damit kann es keine "Perigäen" außerhalb der Rückläufigkeit geben)
-//
-// Robust: Retro-Phasen werden OHNE SEFLG_SPEED ermittelt (sonst kann swisseph-wasm "memory access out of bounds" werfen)
+// - Sonne: Erd-Perihel = Minimum der Sonnen-Distanz im Kalenderjahr
+// - Merkur–Pluto + Chiron: pro rückläufiger Phase genau 1 Perigäum (Distanzminimum)
+// Robust gegen Stationen: Retro-Erkennung mit Hysterese (keine Fenster-Zerhackung)
 
 import SwissEph from "swisseph-wasm";
 
@@ -63,13 +61,13 @@ function formatDateDE({ year, month, day }) {
 
 // ---------------- Math helpers ----------------
 function normDeltaDeg(d) {
-  // auf [-180, +180] normalisieren
+  // auf [-180, +180] normalisieren (robust über 0°/360°)
   let x = ((d + 540) % 360) - 180;
   if (x === -180) x = 180;
   return x;
 }
 
-// Golden section minimum (sparsam: wenige Iterationen)
+// Golden section minimum
 function goldenMin(f, a, b, tolDays) {
   const gr = (Math.sqrt(5) - 1) / 2;
   let c = b - gr * (b - a);
@@ -92,7 +90,6 @@ function goldenMin(f, a, b, tolDays) {
   return (a + b) / 2;
 }
 
-// Distanz-Minimum in [a,b] finden (coarse + refine)
 function minDistanceInWindow(getDist, a, b) {
   const coarseStep = 0.25; // 6h
   let bestJd = a;
@@ -107,8 +104,8 @@ function minDistanceInWindow(getDist, a, b) {
     }
   }
 
-  const left = Math.max(a, bestJd - 0.75);   // 18h links
-  const right = Math.min(b, bestJd + 0.75);  // 18h rechts
+  const left  = Math.max(a, bestJd - 0.75);
+  const right = Math.min(b, bestJd + 0.75);
   const tol = 1 / 1440; // 1 Minute
 
   return goldenMin(getDist, left, right, tol);
@@ -116,32 +113,35 @@ function minDistanceInWindow(getDist, a, b) {
 
 // ---------------- SwissEph access ----------------
 function makeCalc(swe, bodyId) {
-  const flags = swe.SEFLG_SWIEPH; // WICHTIG: kein SEFLG_SPEED (WASM kann sonst crashen)
-
-  function getDist(jd) {
-    const pos = swe.calc_ut(jd, bodyId, flags);
-    return pos[2]; // AU
-  }
-
-  function getLon(jd) {
-    const pos = swe.calc_ut(jd, bodyId, flags);
-    return pos[0]; // ekl. Länge (deg)
-  }
-
-  return { getDist, getLon };
+  const flags = swe.SEFLG_SWIEPH; // wichtig: ohne SEFLG_SPEED (WASM stabil)
+  return {
+    getDist(jd) {
+      const pos = swe.calc_ut(jd, bodyId, flags);
+      return pos[2]; // AU
+    },
+    getLon(jd) {
+      const pos = swe.calc_ut(jd, bodyId, flags);
+      return pos[0]; // ekl. Länge (deg)
+    }
+  };
 }
 
-// Retro-Fenster über ΔLänge (ohne SPEED) bestimmen.
-// Retro, wenn die normalisierte Differenz zwischen zwei Zeitpunkten negativ ist.
+// Retro-Fenster (Hysterese):
+// - Eintritt erst nach N retro-Schritten in Folge
+// - Austritt erst nach N direkten Schritten in Folge
 function findRetroWindows(getLon, jdStart, jdEnd) {
-  const step = 0.125; // 3h (stabil, aber nicht zu viele Calls)
-  const windows = [];
+  const step = 0.125; // 3h
+  const need = 3;     // 3 Schritte ~ 9 Stunden Stabilität
 
+  const windows = [];
   let prevJd = jdStart;
   let prevLon = getLon(prevJd);
 
   let inRetro = false;
   let startJd = null;
+
+  let retroStreak = 0;
+  let directStreak = 0;
 
   for (let jd = jdStart + step; jd <= jdEnd + 1e-9; jd += step) {
     const curJd = Math.min(jd, jdEnd);
@@ -150,16 +150,27 @@ function findRetroWindows(getLon, jdStart, jdEnd) {
     const dLon = normDeltaDeg(curLon - prevLon);
     const isRetroStep = dLon < 0;
 
-    // Eintritt
-    if (!inRetro && isRetroStep) {
-      inRetro = true;
-      startJd = prevJd; // Start am vorherigen Stützpunkt (genug, weil wir am Ende auf Tag runden)
+    if (isRetroStep) {
+      retroStreak++;
+      directStreak = 0;
+    } else {
+      directStreak++;
+      retroStreak = 0;
     }
 
-    // Austritt
-    if (inRetro && !isRetroStep) {
+    // Eintritt: erst wenn Retro stabil ist
+    if (!inRetro && retroStreak >= need) {
+      inRetro = true;
+      // Start etwas zurücksetzen (damit wir den echten Beginn nicht zu spät setzen)
+      startJd = curJd - step * (need + 1);
+      if (startJd < jdStart) startJd = jdStart;
+    }
+
+    // Austritt: erst wenn Direkt stabil ist
+    if (inRetro && directStreak >= need) {
       inRetro = false;
-      windows.push([startJd, curJd]);
+      const endJd = curJd; // Ende nahe aktuellem Punkt
+      windows.push([startJd, endJd]);
       startJd = null;
     }
 
@@ -173,11 +184,10 @@ function findRetroWindows(getLon, jdStart, jdEnd) {
     windows.push([startJd, jdEnd]);
   }
 
-  // sehr kurze Artefakte raus
-  return windows.filter(([a, b]) => (b - a) > (6 / 24)); // > 6h
+  // sehr kurze Artefakte entfernen (> 1 Tag)
+  return windows.filter(([a, b]) => (b - a) > 1.0);
 }
 
-// ---------------- Handler ----------------
 export default async function handler(req, res) {
   setCorsHeaders(req, res);
   if (req.method === "OPTIONS") return res.status(200).end();
@@ -198,9 +208,15 @@ export default async function handler(req, res) {
 
     await swe.initSwissEph();
 
-    // Jahresbereich (UTC)
-    const jdStart = swe.julday(year, 1, 1, 0.0);
-    const jdEnd = swe.julday(year + 1, 1, 2, 0.0); // leicht überlappend
+    // Exakt das Kalenderjahr (UTC)
+    const jdYearStart = swe.julday(year, 1, 1, 0.0);
+    const jdYearEnd = swe.julday(year + 1, 1, 1, 0.0);
+
+    // Für saubere Retro-Fenster über den Jahreswechsel rechnen wir mit Puffer,
+    // geben aber später strikt nur Ereignisse im gewünschten Jahr aus.
+    const pad = 7; // Tage
+    const jdCalcStart = jdYearStart - pad;
+    const jdCalcEnd = jdYearEnd + pad;
 
     const results = [];
     let totalCount = 0;
@@ -212,16 +228,23 @@ export default async function handler(req, res) {
       let perigees = [];
 
       if (body.mode === "SUN") {
-        // Sonne: Erd-Perihel = Distanzminimum im Jahr
-        const jdMin = minDistanceInWindow(getDist, jdStart, jdEnd);
-        perigees = [{ datum: formatDateDE(jdToCalendar(jdMin)) }];
+        // Sonne: Perihel (Minimum Distanz) IM Kalenderjahr
+        const jdMin = minDistanceInWindow(getDist, jdYearStart, jdYearEnd);
+        const cal = jdToCalendar(jdMin);
+        perigees = [{ datum: formatDateDE(cal) }];
       } else {
-        // Planeten/Chiron: Perigäum pro rückläufigem Fenster
-        const windows = findRetroWindows(getLon, jdStart, jdEnd);
+        // pro rückläufiger Phase genau 1 Distanzminimum
+        const windows = findRetroWindows(getLon, jdCalcStart, jdCalcEnd);
 
-        for (const [a, b] of windows) {
-          const jdMin = minDistanceInWindow(getDist, a, b);
-          perigees.push({ datum: formatDateDE(jdToCalendar(jdMin)) });
+        for (const [a0, b0] of windows) {
+          // Perigäum innerhalb des Retro-Fensters
+          const jdMin = minDistanceInWindow(getDist, a0, b0);
+          const cal = jdToCalendar(jdMin);
+
+          // Ausgabe nur wenn Kalendertag im gewünschten Jahr liegt
+          if (cal.year === year) {
+            perigees.push({ datum: formatDateDE(cal) });
+          }
         }
 
         // Duplikate (durch Rundung auf Tag) entfernen
@@ -234,10 +257,18 @@ export default async function handler(req, res) {
       }
 
       if (perigees.length === 0) {
-        results.push({ body: body.name, perigees: [], info: "Kein Perigäum in diesem Jahr" });
+        results.push({
+          body: body.name,
+          perigees: [],
+          info: "Kein Perigäum in diesem Jahr"
+        });
       } else {
         totalCount += perigees.length;
-        results.push({ body: body.name, perigees, info: null });
+        results.push({
+          body: body.name,
+          perigees,
+          info: null
+        });
       }
     }
 
