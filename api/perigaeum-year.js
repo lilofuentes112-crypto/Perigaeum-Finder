@@ -1,8 +1,10 @@
 // api/perigaeum-year.js
-// Jahres-Perigäum-Suche (Datum, deutsch)
-// - Sonne: Erd-Perihel (Minimum der Sonnen-Distanz) im Jahr, ohne Retro-Filter
+// Jahres-Perigäum-Rechner (Datum, deutsch, UTC)
+// - Sonne: Erd-Perihel (Minimum der Sonnen-Distanz) im Jahr (kein Retro-Filter)
 // - Merkur–Pluto + Chiron: Perigäum = Distanz-Minimum innerhalb JEDER rückläufigen Phase
-//   (damit kann es keine „Perigäen“ außerhalb der Rückläufigkeit geben)
+//   (damit kann es keine "Perigäen" außerhalb der Rückläufigkeit geben)
+//
+// Robust: Retro-Phasen werden OHNE SEFLG_SPEED ermittelt (sonst kann swisseph-wasm "memory access out of bounds" werfen)
 
 import SwissEph from "swisseph-wasm";
 
@@ -28,7 +30,7 @@ function setCorsHeaders(req, res) {
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
 }
 
-// --------------- Datum helpers ---------------
+// --------------- Datum helpers (UTC) ---------------
 function jdToCalendar(jd) {
   const Z = Math.floor(jd + 0.5);
   const F = jd + 0.5 - Z;
@@ -59,55 +61,30 @@ function formatDateDE({ year, month, day }) {
   return `${dd}.${mm}.${year}`;
 }
 
-// --------------- Numerik helpers ---------------
-// Bisection für Nullstelle von f(jd) im Intervall [a,b] (f(a) und f(b) haben unterschiedliches Vorzeichen)
-function bisectZero(f, a, b, tolDays) {
-  let fa = f(a);
-  let fb = f(b);
-  if (!Number.isFinite(fa) || !Number.isFinite(fb)) return (a + b) / 2;
-  if (fa === 0) return a;
-  if (fb === 0) return b;
-
-  // Sicherheitsnetz: falls doch kein Vorzeichenwechsel, gib Mitte zurück
-  if ((fa > 0 && fb > 0) || (fa < 0 && fb < 0)) return (a + b) / 2;
-
-  let left = a, right = b;
-  for (let it = 0; it < 80; it++) {
-    const mid = (left + right) / 2;
-    const fm = f(mid);
-    if (!Number.isFinite(fm)) return mid;
-    if ((right - left) <= tolDays) return mid;
-    if ((fa > 0 && fm > 0) || (fa < 0 && fm < 0)) {
-      left = mid;
-      fa = fm;
-    } else {
-      right = mid;
-      fb = fm;
-    }
-  }
-  return (left + right) / 2;
+// ---------------- Math helpers ----------------
+function normDeltaDeg(d) {
+  // auf [-180, +180] normalisieren
+  let x = ((d + 540) % 360) - 180;
+  if (x === -180) x = 180;
+  return x;
 }
 
-// Golden-Section-Search (Minimum) auf [a,b]
+// Golden section minimum (sparsam: wenige Iterationen)
 function goldenMin(f, a, b, tolDays) {
-  const gr = (Math.sqrt(5) - 1) / 2; // 0.618...
+  const gr = (Math.sqrt(5) - 1) / 2;
   let c = b - gr * (b - a);
   let d = a + gr * (b - a);
   let fc = f(c);
   let fd = f(d);
 
-  for (let it = 0; it < 120; it++) {
+  for (let it = 0; it < 60; it++) {
     if ((b - a) <= tolDays) break;
     if (fd < fc) {
-      a = c;
-      c = d;
-      fc = fd;
+      a = c; c = d; fc = fd;
       d = a + gr * (b - a);
       fd = f(d);
     } else {
-      b = d;
-      d = c;
-      fd = fc;
+      b = d; d = c; fd = fc;
       c = b - gr * (b - a);
       fc = f(c);
     }
@@ -115,78 +92,7 @@ function goldenMin(f, a, b, tolDays) {
   return (a + b) / 2;
 }
 
-// --------------- SwissEph access ---------------
-function makeCalc(swe, bodyId) {
-  // SEFLG_SPEED brauchen wir für lonSpeed (pos[3])
-  const flags = swe.SEFLG_SWIEPH | swe.SEFLG_SPEED;
-
-  function getDist(jd) {
-    const pos = swe.calc_ut(jd, bodyId, flags);
-    // pos[2] = Distanz in AU
-    return pos[2];
-  }
-
-  function getLonSpeed(jd) {
-    const pos = swe.calc_ut(jd, bodyId, flags);
-    // pos[3] = Geschwindigkeit der ekl. Länge (deg/day)
-    return pos[3];
-  }
-
-  return { getDist, getLonSpeed };
-}
-
-// Retro-Fenster finden: lonSpeed < 0
-function findRetroWindows(getLonSpeed, jdStart, jdEnd) {
-  const step = 0.5; // 12h
-  const tol = 1 / 1440; // 1 Minute in Tagen
-
-  const windows = [];
-  let inRetro = false;
-  let startJd = null;
-
-  let prevJd = jdStart;
-  let prevV = getLonSpeed(prevJd);
-
-  // falls ganz am Anfang schon retro
-  if (prevV < 0) {
-    inRetro = true;
-    startJd = jdStart;
-  }
-
-  for (let jd = jdStart + step; jd <= jdEnd + 1e-9; jd += step) {
-    const curJd = Math.min(jd, jdEnd);
-    const curV = getLonSpeed(curJd);
-
-    // Eintritt: +/0 -> -
-    if (!inRetro && prevV >= 0 && curV < 0) {
-      const start = bisectZero(getLonSpeed, prevJd, curJd, tol);
-      inRetro = true;
-      startJd = start;
-    }
-
-    // Austritt: - -> +/0
-    if (inRetro && prevV < 0 && curV >= 0) {
-      const end = bisectZero(getLonSpeed, prevJd, curJd, tol);
-      inRetro = false;
-      windows.push([startJd, end]);
-      startJd = null;
-    }
-
-    prevJd = curJd;
-    prevV = curV;
-    if (curJd >= jdEnd) break;
-  }
-
-  // falls bis Jahresende retro bleibt
-  if (inRetro && startJd != null) {
-    windows.push([startJd, jdEnd]);
-  }
-
-  // sehr kurze Fenster rausfiltern (numerische Artefakte)
-  return windows.filter(([a, b]) => (b - a) > (2 / 24)); // > 2h
-}
-
-// Distanz-Minimum in Fenster finden (coarse 6h + refine)
+// Distanz-Minimum in [a,b] finden (coarse + refine)
 function minDistanceInWindow(getDist, a, b) {
   const coarseStep = 0.25; // 6h
   let bestJd = a;
@@ -201,13 +107,74 @@ function minDistanceInWindow(getDist, a, b) {
     }
   }
 
-  // refine um bestJd herum
-  const left = Math.max(a, bestJd - 0.75);  // 18h links
-  const right = Math.min(b, bestJd + 0.75); // 18h rechts
+  const left = Math.max(a, bestJd - 0.75);   // 18h links
+  const right = Math.min(b, bestJd + 0.75);  // 18h rechts
   const tol = 1 / 1440; // 1 Minute
 
-  const jdMin = goldenMin(getDist, left, right, tol);
-  return jdMin;
+  return goldenMin(getDist, left, right, tol);
+}
+
+// ---------------- SwissEph access ----------------
+function makeCalc(swe, bodyId) {
+  const flags = swe.SEFLG_SWIEPH; // WICHTIG: kein SEFLG_SPEED (WASM kann sonst crashen)
+
+  function getDist(jd) {
+    const pos = swe.calc_ut(jd, bodyId, flags);
+    return pos[2]; // AU
+  }
+
+  function getLon(jd) {
+    const pos = swe.calc_ut(jd, bodyId, flags);
+    return pos[0]; // ekl. Länge (deg)
+  }
+
+  return { getDist, getLon };
+}
+
+// Retro-Fenster über ΔLänge (ohne SPEED) bestimmen.
+// Retro, wenn die normalisierte Differenz zwischen zwei Zeitpunkten negativ ist.
+function findRetroWindows(getLon, jdStart, jdEnd) {
+  const step = 0.125; // 3h (stabil, aber nicht zu viele Calls)
+  const windows = [];
+
+  let prevJd = jdStart;
+  let prevLon = getLon(prevJd);
+
+  let inRetro = false;
+  let startJd = null;
+
+  for (let jd = jdStart + step; jd <= jdEnd + 1e-9; jd += step) {
+    const curJd = Math.min(jd, jdEnd);
+    const curLon = getLon(curJd);
+
+    const dLon = normDeltaDeg(curLon - prevLon);
+    const isRetroStep = dLon < 0;
+
+    // Eintritt
+    if (!inRetro && isRetroStep) {
+      inRetro = true;
+      startJd = prevJd; // Start am vorherigen Stützpunkt (genug, weil wir am Ende auf Tag runden)
+    }
+
+    // Austritt
+    if (inRetro && !isRetroStep) {
+      inRetro = false;
+      windows.push([startJd, curJd]);
+      startJd = null;
+    }
+
+    prevJd = curJd;
+    prevLon = curLon;
+
+    if (curJd >= jdEnd) break;
+  }
+
+  if (inRetro && startJd != null) {
+    windows.push([startJd, jdEnd]);
+  }
+
+  // sehr kurze Artefakte raus
+  return windows.filter(([a, b]) => (b - a) > (6 / 24)); // > 6h
 }
 
 // ---------------- Handler ----------------
@@ -231,56 +198,46 @@ export default async function handler(req, res) {
 
     await swe.initSwissEph();
 
-    // 1. Jan 00:00 UT bis 2. Jan des Folgejahres 00:00 UT (leicht überlappend)
+    // Jahresbereich (UTC)
     const jdStart = swe.julday(year, 1, 1, 0.0);
-    const jdEnd = swe.julday(year + 1, 1, 2, 0.0);
+    const jdEnd = swe.julday(year + 1, 1, 2, 0.0); // leicht überlappend
 
     const results = [];
     let totalCount = 0;
 
     for (const body of BODIES) {
       const bodyId = swe[body.id];
-      const { getDist, getLonSpeed } = makeCalc(swe, bodyId);
+      const { getDist, getLon } = makeCalc(swe, bodyId);
 
-      const perigees = [];
+      let perigees = [];
 
       if (body.mode === "SUN") {
-        // Sonne: Distanz-Minimum im Jahr (Erd-Perihel). Kein Retro-Filter.
+        // Sonne: Erd-Perihel = Distanzminimum im Jahr
         const jdMin = minDistanceInWindow(getDist, jdStart, jdEnd);
-        perigees.push({ datum: formatDateDE(jdToCalendar(jdMin)) });
+        perigees = [{ datum: formatDateDE(jdToCalendar(jdMin)) }];
       } else {
-        // Planeten/Chiron: Perigäum nur innerhalb rückläufiger Fenster
-        const windows = findRetroWindows(getLonSpeed, jdStart, jdEnd);
+        // Planeten/Chiron: Perigäum pro rückläufigem Fenster
+        const windows = findRetroWindows(getLon, jdStart, jdEnd);
 
         for (const [a, b] of windows) {
           const jdMin = minDistanceInWindow(getDist, a, b);
           perigees.push({ datum: formatDateDE(jdToCalendar(jdMin)) });
         }
-      }
 
-      // Duplikate entfernen (falls zwei Retro-Fenster durch Rundung auf denselben Kalendertag fallen)
-      const uniq = [];
-      const seen = new Set();
-      for (const p of perigees) {
-        if (!seen.has(p.datum)) {
+        // Duplikate (durch Rundung auf Tag) entfernen
+        const seen = new Set();
+        perigees = perigees.filter((p) => {
+          if (seen.has(p.datum)) return false;
           seen.add(p.datum);
-          uniq.push(p);
-        }
+          return true;
+        });
       }
 
-      if (uniq.length === 0) {
-        results.push({
-          body: body.name,
-          perigees: [],
-          info: "Kein Perigäum in diesem Jahr"
-        });
+      if (perigees.length === 0) {
+        results.push({ body: body.name, perigees: [], info: "Kein Perigäum in diesem Jahr" });
       } else {
-        totalCount += uniq.length;
-        results.push({
-          body: body.name,
-          perigees: uniq,
-          info: null
-        });
+        totalCount += perigees.length;
+        results.push({ body: body.name, perigees, info: null });
       }
     }
 
@@ -292,10 +249,7 @@ export default async function handler(req, res) {
     });
   } catch (e) {
     console.error("Perigäum-Fehler:", e);
-    return res.status(500).json({
-      ok: false,
-      error: String(e)
-    });
+    return res.status(500).json({ ok: false, error: String(e) });
   } finally {
     try { swe.close(); } catch (_) {}
   }
