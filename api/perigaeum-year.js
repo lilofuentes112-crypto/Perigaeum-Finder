@@ -1,23 +1,25 @@
 // api/perigaeum-year.js
-// Jahres-Perigäum-Suche für Sonne + Planeten (nur Datum, deutsch)
-// Robustere Minima-Erkennung + Retrograditäts-Filter (für Planeten)
+// Jahres-Perigäum-Suche (Datum, deutsch)
+// - Sonne: Erd-Perihel (Minimum der Sonnen-Distanz) im Jahr, ohne Retro-Filter
+// - Merkur–Pluto + Chiron: Perigäum = Distanz-Minimum innerhalb JEDER rückläufigen Phase
+//   (damit kann es keine „Perigäen“ außerhalb der Rückläufigkeit geben)
 
 import SwissEph from "swisseph-wasm";
 
 const BODIES = [
-  { id: "SE_SUN",     name: "Sonne",   needsRetro: false },
-  { id: "SE_MERCURY", name: "Merkur",  needsRetro: true  },
-  { id: "SE_VENUS",   name: "Venus",   needsRetro: true  },
-  { id: "SE_MARS",    name: "Mars",    needsRetro: true  },
-  { id: "SE_JUPITER", name: "Jupiter", needsRetro: true  },
-  { id: "SE_SATURN",  name: "Saturn",  needsRetro: true  },
-  { id: "SE_CHIRON",  name: "Chiron",  needsRetro: true  },
-  { id: "SE_URANUS",  name: "Uranus",  needsRetro: true  },
-  { id: "SE_NEPTUNE", name: "Neptun",  needsRetro: true  },
-  { id: "SE_PLUTO",   name: "Pluto",   needsRetro: true  }
+  { id: "SE_SUN",     name: "Sonne",   mode: "SUN"   },
+  { id: "SE_MERCURY", name: "Merkur",  mode: "RETRO" },
+  { id: "SE_VENUS",   name: "Venus",   mode: "RETRO" },
+  { id: "SE_MARS",    name: "Mars",    mode: "RETRO" },
+  { id: "SE_JUPITER", name: "Jupiter", mode: "RETRO" },
+  { id: "SE_SATURN",  name: "Saturn",  mode: "RETRO" },
+  { id: "SE_CHIRON",  name: "Chiron",  mode: "RETRO" },
+  { id: "SE_URANUS",  name: "Uranus",  mode: "RETRO" },
+  { id: "SE_NEPTUNE", name: "Neptun",  mode: "RETRO" },
+  { id: "SE_PLUTO",   name: "Pluto",   mode: "RETRO" }
 ];
 
-// einfache CORS-Unterstützung
+// ---------------- CORS ----------------
 function setCorsHeaders(req, res) {
   const origin = req.headers.origin || "";
   res.setHeader("Access-Control-Allow-Origin", origin || "*");
@@ -26,7 +28,7 @@ function setCorsHeaders(req, res) {
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
 }
 
-// Julianisches Datum -> gregorianisches Kalenderdatum (UTC), nur Tag
+// --------------- Datum helpers ---------------
 function jdToCalendar(jd) {
   const Z = Math.floor(jd + 0.5);
   const F = jd + 0.5 - Z;
@@ -45,13 +47,8 @@ function jdToCalendar(jd) {
   const dayFloat = B - D - Math.floor(30.6001 * E) + F;
   const day = Math.floor(dayFloat + 1e-6);
 
-  let month;
-  if (E < 14) month = E - 1;
-  else month = E - 13;
-
-  let year;
-  if (month > 2) year = C - 4716;
-  else year = C - 4715;
+  const month = (E < 14) ? (E - 1) : (E - 13);
+  const year = (month > 2) ? (C - 4716) : (C - 4715);
 
   return { year, month, day };
 }
@@ -62,59 +59,161 @@ function formatDateDE({ year, month, day }) {
   return `${dd}.${mm}.${year}`;
 }
 
-// Winkel-Differenz in Grad auf [-180..+180]
-function angDiffDeg(a, b) {
-  let d = a - b;
-  while (d > 180) d -= 360;
-  while (d < -180) d += 360;
-  return d;
-}
+// --------------- Numerik helpers ---------------
+// Bisection für Nullstelle von f(jd) im Intervall [a,b] (f(a) und f(b) haben unterschiedliches Vorzeichen)
+function bisectZero(f, a, b, tolDays) {
+  let fa = f(a);
+  let fb = f(b);
+  if (!Number.isFinite(fa) || !Number.isFinite(fb)) return (a + b) / 2;
+  if (fa === 0) return a;
+  if (fb === 0) return b;
 
-// geozentrische Position (λ, β, r) in Grad/AU
-function calcGeo(swe, jd, bodyId) {
-  const pos = swe.calc_ut(jd, bodyId, swe.SEFLG_SWIEPH);
-  return { lon: pos[0], lat: pos[1], dist: pos[2] };
-}
+  // Sicherheitsnetz: falls doch kein Vorzeichenwechsel, gib Mitte zurück
+  if ((fa > 0 && fb > 0) || (fa < 0 && fb < 0)) return (a + b) / 2;
 
-// Retrograd? (über 1 Tag): wenn geozentrische Länge abnimmt
-function isRetrograde(swe, jd, bodyId) {
-  // Sonne braucht keine Retrograd-Prüfung
-  const p0 = calcGeo(swe, jd - 0.5, bodyId).lon;
-  const p1 = calcGeo(swe, jd + 0.5, bodyId).lon;
-  const d = angDiffDeg(p1, p0); // Fortschritt über ~1 Tag
-  return d < 0;
-}
-
-// Deduplizieren: wenn mehrere „Minima“ sehr nahe beieinander liegen,
-// behalten wir nur das kleinste Distanzminimum.
-function dedupeByWindow(events, windowDays = 10) {
-  if (!events.length) return events;
-  const out = [];
-  let group = [events[0]];
-
-  for (let i = 1; i < events.length; i++) {
-    const prev = group[group.length - 1];
-    const cur = events[i];
-    if (Math.abs(cur.jd - prev.jd) <= windowDays) {
-      group.push(cur);
+  let left = a, right = b;
+  for (let it = 0; it < 80; it++) {
+    const mid = (left + right) / 2;
+    const fm = f(mid);
+    if (!Number.isFinite(fm)) return mid;
+    if ((right - left) <= tolDays) return mid;
+    if ((fa > 0 && fm > 0) || (fa < 0 && fm < 0)) {
+      left = mid;
+      fa = fm;
     } else {
-      // bestes der Gruppe
-      group.sort((a, b) => a.dist - b.dist);
-      out.push(group[0]);
-      group = [cur];
+      right = mid;
+      fb = fm;
     }
   }
-  group.sort((a, b) => a.dist - b.dist);
-  out.push(group[0]);
-  return out;
+  return (left + right) / 2;
 }
 
+// Golden-Section-Search (Minimum) auf [a,b]
+function goldenMin(f, a, b, tolDays) {
+  const gr = (Math.sqrt(5) - 1) / 2; // 0.618...
+  let c = b - gr * (b - a);
+  let d = a + gr * (b - a);
+  let fc = f(c);
+  let fd = f(d);
+
+  for (let it = 0; it < 120; it++) {
+    if ((b - a) <= tolDays) break;
+    if (fd < fc) {
+      a = c;
+      c = d;
+      fc = fd;
+      d = a + gr * (b - a);
+      fd = f(d);
+    } else {
+      b = d;
+      d = c;
+      fd = fc;
+      c = b - gr * (b - a);
+      fc = f(c);
+    }
+  }
+  return (a + b) / 2;
+}
+
+// --------------- SwissEph access ---------------
+function makeCalc(swe, bodyId) {
+  // SEFLG_SPEED brauchen wir für lonSpeed (pos[3])
+  const flags = swe.SEFLG_SWIEPH | swe.SEFLG_SPEED;
+
+  function getDist(jd) {
+    const pos = swe.calc_ut(jd, bodyId, flags);
+    // pos[2] = Distanz in AU
+    return pos[2];
+  }
+
+  function getLonSpeed(jd) {
+    const pos = swe.calc_ut(jd, bodyId, flags);
+    // pos[3] = Geschwindigkeit der ekl. Länge (deg/day)
+    return pos[3];
+  }
+
+  return { getDist, getLonSpeed };
+}
+
+// Retro-Fenster finden: lonSpeed < 0
+function findRetroWindows(getLonSpeed, jdStart, jdEnd) {
+  const step = 0.5; // 12h
+  const tol = 1 / 1440; // 1 Minute in Tagen
+
+  const windows = [];
+  let inRetro = false;
+  let startJd = null;
+
+  let prevJd = jdStart;
+  let prevV = getLonSpeed(prevJd);
+
+  // falls ganz am Anfang schon retro
+  if (prevV < 0) {
+    inRetro = true;
+    startJd = jdStart;
+  }
+
+  for (let jd = jdStart + step; jd <= jdEnd + 1e-9; jd += step) {
+    const curJd = Math.min(jd, jdEnd);
+    const curV = getLonSpeed(curJd);
+
+    // Eintritt: +/0 -> -
+    if (!inRetro && prevV >= 0 && curV < 0) {
+      const start = bisectZero(getLonSpeed, prevJd, curJd, tol);
+      inRetro = true;
+      startJd = start;
+    }
+
+    // Austritt: - -> +/0
+    if (inRetro && prevV < 0 && curV >= 0) {
+      const end = bisectZero(getLonSpeed, prevJd, curJd, tol);
+      inRetro = false;
+      windows.push([startJd, end]);
+      startJd = null;
+    }
+
+    prevJd = curJd;
+    prevV = curV;
+    if (curJd >= jdEnd) break;
+  }
+
+  // falls bis Jahresende retro bleibt
+  if (inRetro && startJd != null) {
+    windows.push([startJd, jdEnd]);
+  }
+
+  // sehr kurze Fenster rausfiltern (numerische Artefakte)
+  return windows.filter(([a, b]) => (b - a) > (2 / 24)); // > 2h
+}
+
+// Distanz-Minimum in Fenster finden (coarse 6h + refine)
+function minDistanceInWindow(getDist, a, b) {
+  const coarseStep = 0.25; // 6h
+  let bestJd = a;
+  let bestD = getDist(a);
+
+  for (let jd = a; jd <= b + 1e-9; jd += coarseStep) {
+    const j = Math.min(jd, b);
+    const d = getDist(j);
+    if (d < bestD) {
+      bestD = d;
+      bestJd = j;
+    }
+  }
+
+  // refine um bestJd herum
+  const left = Math.max(a, bestJd - 0.75);  // 18h links
+  const right = Math.min(b, bestJd + 0.75); // 18h rechts
+  const tol = 1 / 1440; // 1 Minute
+
+  const jdMin = goldenMin(getDist, left, right, tol);
+  return jdMin;
+}
+
+// ---------------- Handler ----------------
 export default async function handler(req, res) {
   setCorsHeaders(req, res);
-
-  if (req.method === "OPTIONS") {
-    return res.status(200).end();
-  }
+  if (req.method === "OPTIONS") return res.status(200).end();
 
   const swe = new SwissEph();
 
@@ -132,85 +231,54 @@ export default async function handler(req, res) {
 
     await swe.initSwissEph();
 
+    // 1. Jan 00:00 UT bis 2. Jan des Folgejahres 00:00 UT (leicht überlappend)
     const jdStart = swe.julday(year, 1, 1, 0.0);
-    const jdEnd = swe.julday(year + 1, 1, 2, 0.0); // leicht überlappend
-    const days = Math.floor(jdEnd - jdStart);
-
-    // Epsilon: Mindest-"Höhe" des lokalen Minimums, damit kleine Zacken ignoriert werden.
-    // 1e-5 AU ≈ 1500 km (grobe Größenordnung)
-    const EPS = 1e-5;
+    const jdEnd = swe.julday(year + 1, 1, 2, 0.0);
 
     const results = [];
     let totalCount = 0;
 
     for (const body of BODIES) {
       const bodyId = swe[body.id];
+      const { getDist, getLonSpeed } = makeCalc(swe, bodyId);
 
-      // Wir nutzen ein 3-Tages-Fenster (i-1, i, i+1) und prüfen lokales Minimum:
-      // dist[i] < dist[i-1] und dist[i] <= dist[i+1] (plus EPS-Bedingungen)
-      const candidates = [];
-
-      // Vorab Distanzwerte in Array (stabiler + schneller als dauernd mehrfach zu rechnen)
-      const distArr = new Array(days + 1);
-      const lonArr = new Array(days + 1); // für Retrograd (falls nötig)
-
-      for (let i = 0; i <= days; i++) {
-        const jd = jdStart + i;
-        const geo = calcGeo(swe, jd, bodyId);
-        distArr[i] = geo.dist;
-        lonArr[i] = geo.lon;
-      }
-
-      // Lokale Minima suchen (nicht am Rand)
-      for (let i = 1; i < days; i++) {
-        const dPrev = distArr[i - 1];
-        const dHere = distArr[i];
-        const dNext = distArr[i + 1];
-
-        // robust: es muss wirklich "runter und wieder rauf" gehen
-        const downEnough = (dPrev - dHere) > EPS;
-        const upEnough   = (dNext - dHere) > EPS;
-
-        if (downEnough && (dHere <= dNext) && upEnough) {
-          const jd = jdStart + i;
-
-          // Retrograd-Filter (außer Sonne)
-          if (body.needsRetro) {
-            // Tagesdelta der Länge um jd herum
-            const lon0 = lonArr[i - 1];
-            const lon1 = lonArr[i + 1];
-            const dLon = angDiffDeg(lon1, lon0); // über 2 Tage
-            // rückläufig, wenn die Länge im Mittel abnimmt
-            if (!(dLon < 0)) continue;
-          }
-
-          candidates.push({ jd, dist: dHere });
-        }
-      }
-
-      // Deduplizieren (falls numerische Zacken mehrere "Minima" nahe beieinander erzeugen)
-      const perigeesJd = dedupeByWindow(candidates, 12);
-
-      // Nur Events, deren Kalenderdatum im Zieljahr liegt (UTC-Kalenderdatum)
       const perigees = [];
-      for (const ev of perigeesJd) {
-        const cal = jdToCalendar(ev.jd);
-        if (cal.year === year) {
-          perigees.push({ datum: formatDateDE(cal) });
+
+      if (body.mode === "SUN") {
+        // Sonne: Distanz-Minimum im Jahr (Erd-Perihel). Kein Retro-Filter.
+        const jdMin = minDistanceInWindow(getDist, jdStart, jdEnd);
+        perigees.push({ datum: formatDateDE(jdToCalendar(jdMin)) });
+      } else {
+        // Planeten/Chiron: Perigäum nur innerhalb rückläufiger Fenster
+        const windows = findRetroWindows(getLonSpeed, jdStart, jdEnd);
+
+        for (const [a, b] of windows) {
+          const jdMin = minDistanceInWindow(getDist, a, b);
+          perigees.push({ datum: formatDateDE(jdToCalendar(jdMin)) });
         }
       }
 
-      if (perigees.length === 0) {
+      // Duplikate entfernen (falls zwei Retro-Fenster durch Rundung auf denselben Kalendertag fallen)
+      const uniq = [];
+      const seen = new Set();
+      for (const p of perigees) {
+        if (!seen.has(p.datum)) {
+          seen.add(p.datum);
+          uniq.push(p);
+        }
+      }
+
+      if (uniq.length === 0) {
         results.push({
           body: body.name,
           perigees: [],
           info: "Kein Perigäum in diesem Jahr"
         });
       } else {
-        totalCount += perigees.length;
+        totalCount += uniq.length;
         results.push({
           body: body.name,
-          perigees,
+          perigees: uniq,
           info: null
         });
       }
