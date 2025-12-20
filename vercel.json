@@ -1,7 +1,6 @@
 {
   "functions": {
     "api/perigaeum-year.js": {
-      "runtime": "nodejs20.x",
       "includeFiles": "api/ephe/**"
     }
   }
