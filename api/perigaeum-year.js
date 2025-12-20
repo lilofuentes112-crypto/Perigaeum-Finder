@@ -1,10 +1,11 @@
 // api/perigaeum-year.js
 // Jahres-Perigäum-Rechner (Datum, deutsch, UTC)
 // - Sonne: Erd-Perihel = Minimum der Sonnen-Distanz im Kalenderjahr
-// - Merkur–Pluto + Chiron: pro rückläufiger Phase genau 1 Distanzminimum
-// Rückläufigkeit wird direkt aus Swiss Ephemeris SPEED bestimmt (pos[3])
+// - Merkur–Pluto + Chiron: pro rückläufiger Phase genau 1 Perigäum (Distanzminimum)
+// Retro-Erkennung über SwissEphemeris SPEED (robust, kein Station-Flattern per dLon)
 
 import SwissEph from "swisseph-wasm";
+import path from "path";
 
 const BODIES = [
   { id: "SE_SUN",     name: "Sonne",   mode: "SUN"   },
@@ -67,7 +68,7 @@ function goldenMin(f, a, b, tolDays) {
   let fc = f(c);
   let fd = f(d);
 
-  for (let it = 0; it < 60; it++) {
+  for (let it = 0; it < 80; it++) {
     if ((b - a) <= tolDays) break;
     if (fd < fc) {
       a = c; c = d; fc = fd;
@@ -96,59 +97,54 @@ function minDistanceInWindow(getDist, a, b) {
     }
   }
 
-  const left  = Math.max(a, bestJd - 0.75);
-  const right = Math.min(b, bestJd + 0.75);
+  const left  = Math.max(a, bestJd - 2.0);
+  const right = Math.min(b, bestJd + 2.0);
   const tol = 1 / 1440; // 1 Minute
   return goldenMin(getDist, left, right, tol);
 }
 
 // ---------------- SwissEph access ----------------
 function makeCalc(swe, bodyId) {
-  // WICHTIG: mit SPEED, damit wir Retro sauber erkennen können
+  // Mit SPEED: Retro direkt über Geschwindigkeitsvorzeichen (deg/day)
   const flags = swe.SEFLG_SWIEPH | swe.SEFLG_SPEED;
 
   return {
     getDist(jd) {
       const pos = swe.calc_ut(jd, bodyId, flags);
-      return pos[2]; // AU
+      return pos[2]; // Distanz (AU) geozentrisch
     },
-    getSpeedLon(jd) {
+    getLonSpeed(jd) {
       const pos = swe.calc_ut(jd, bodyId, flags);
-      return pos[3]; // deg/day (ekl. Länge)
+      return pos[3]; // Längengeschwindigkeit (deg/day)
     }
   };
 }
 
-// Retro-Fenster über SPEED (robust um Stationen):
-// - retro wenn speedLon < -eps
-// - direkt wenn speedLon > +eps
-// - |speedLon| <= eps = Station/neutral -> zählt nicht als Umschalten
-function findRetroWindowsBySpeed(getSpeedLon, jdStart, jdEnd) {
+// Retro-Fenster (Hysterese):
+// - Eintritt erst nach N retro-Schritten in Folge
+// - Austritt erst nach N direkten Schritten in Folge
+function findRetroWindows(getLonSpeed, jdStart, jdEnd) {
   const step = 0.125; // 3h
-  const need = 3;     // 3 Schritte ~ 9h Stabilität
-
-  // eps in deg/day: sehr klein, aber nicht 0 (Stationen)
-  // 1e-5 deg/day ~ 0.036" pro Tag (extrem klein) -> konservativ
-  const eps = 1e-5;
+  const need = 3;     // 9h Stabilität
+  const epsSpeed = 1e-6; // deg/day: neutraler Bereich um 0 (Station)
 
   const windows = [];
   let inRetro = false;
   let startJd = null;
-
   let retroStreak = 0;
   let directStreak = 0;
 
   for (let jd = jdStart; jd <= jdEnd + 1e-9; jd += step) {
     const curJd = Math.min(jd, jdEnd);
-    const v = getSpeedLon(curJd);
+    const sp = getLonSpeed(curJd);
 
-    // Station/neutral: nicht als Richtungswechsel zählen
-    if (Math.abs(v) <= eps) {
+    // Station/nahe 0: nicht als Richtungswechsel zählen
+    if (Math.abs(sp) <= epsSpeed) {
       if (curJd >= jdEnd) break;
       continue;
     }
 
-    const isRetro = v < 0;
+    const isRetro = sp < 0;
 
     if (isRetro) {
       retroStreak++;
@@ -177,6 +173,7 @@ function findRetroWindowsBySpeed(getSpeedLon, jdStart, jdEnd) {
     windows.push([startJd, jdEnd]);
   }
 
+  // Artefakte entfernen (zu kurz)
   return windows.filter(([a, b]) => (b - a) > 1.0);
 }
 
@@ -200,12 +197,17 @@ export default async function handler(req, res) {
 
     await swe.initSwissEph();
 
-    // Exakt das Kalenderjahr (UTC)
-    const jdYearStart = swe.julday(year, 1, 1, 0.0);
-    const jdYearEnd   = swe.julday(year + 1, 1, 1, 0.0);
+    // >>> WICHTIG: Ephemeriden-Pfad setzen (Repo-root /ephe) <<<
+    // Vercel/Serverless: process.cwd() zeigt auf Deploy-Root
+    const ephePath = path.join(process.cwd(), "ephe");
+    await swe.set_ephe_path(ephePath);
 
-    // Puffer über Jahreswechsel
-    const pad = 20; // etwas größer als 7, damit Stationen nicht "abgeschnitten" werden
+    // Exakt das Kalenderjahr (UTC)
+    const jdYearStart = swe.julday(year, 1, 1, 0.0, swe.SE_GREG_CAL);
+    const jdYearEnd   = swe.julday(year + 1, 1, 1, 0.0, swe.SE_GREG_CAL);
+
+    // Puffer für Retro-Fenster über Jahreswechsel
+    const pad = 20; // etwas großzügiger für Langsamläufer
     const jdCalcStart = jdYearStart - pad;
     const jdCalcEnd   = jdYearEnd + pad;
 
@@ -214,29 +216,27 @@ export default async function handler(req, res) {
 
     for (const body of BODIES) {
       const bodyId = swe[body.id];
-      const { getDist, getSpeedLon } = makeCalc(swe, bodyId);
+      const { getDist, getLonSpeed } = makeCalc(swe, bodyId);
 
       let perigees = [];
 
       if (body.mode === "SUN") {
+        // Sonne: Perihel (Minimum Distanz) im Kalenderjahr
         const jdMin = minDistanceInWindow(getDist, jdYearStart, jdYearEnd);
-        const cal = jdToCalendar(jdMin);
-        perigees = [{ datum: formatDateDE(cal) }];
+        perigees = [{ datum: formatDateDE(jdToCalendar(jdMin)) }];
       } else {
-        // Retrofenster über SPEED
-        const windows = findRetroWindowsBySpeed(getSpeedLon, jdCalcStart, jdCalcEnd);
+        // Pro rückläufiger Phase genau 1 Distanzminimum
+        const windows = findRetroWindows(getLonSpeed, jdCalcStart, jdCalcEnd);
 
         for (const [a0, b0] of windows) {
           const jdMin = minDistanceInWindow(getDist, a0, b0);
 
-          // Ausgabe nur wenn Ereignis im Kalenderjahr liegt
           if (jdMin >= jdYearStart && jdMin < jdYearEnd) {
-            const cal = jdToCalendar(jdMin);
-            perigees.push({ datum: formatDateDE(cal) });
+            perigees.push({ datum: formatDateDE(jdToCalendar(jdMin)) });
           }
         }
 
-        // Duplikate entfernen (Tag-Rundung)
+        // Duplikate (durch Rundung auf Tag) entfernen
         const seen = new Set();
         perigees = perigees.filter((p) => {
           if (seen.has(p.datum)) return false;
@@ -275,4 +275,3 @@ export default async function handler(req, res) {
     try { swe.close(); } catch (_) {}
   }
 }
-
