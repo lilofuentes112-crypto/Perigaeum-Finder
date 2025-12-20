@@ -107,8 +107,17 @@ function minDistanceInWindow(getDist, a, b) {
 }
 
 // ---------------- SwissEph access ----------------
+// WICHTIG:
+// - Für Chiron müssen wir HELIOZENTRISCH rechnen, sonst gibt es oft "kein Perigäum" im Retrofenster,
+//   weil geozentrische Distanz/Retro nicht sauber zusammenpassen.
+// - Für alle anderen bleibt es wie bisher (geozentrisch).
 function makeCalc(swe, bodyId) {
-  const flags = swe.SEFLG_SWIEPH | swe.SEFLG_SPEED;
+  const baseFlags = swe.SEFLG_SWIEPH | swe.SEFLG_SPEED;
+
+  // Chiron speziell: heliozentrisch
+  const flags = (bodyId === swe.SE_CHIRON)
+    ? (baseFlags | swe.SEFLG_HELCTR)
+    : baseFlags;
 
   return {
     getDist(jd) {
@@ -281,3 +290,4 @@ export default async function handler(req, res) {
     try { if (typeof swe.close === "function") swe.close(); } catch (_) {}
   }
 }
+
