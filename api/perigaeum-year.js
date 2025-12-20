@@ -1,8 +1,8 @@
 // api/perigaeum-year.js
 // Jahres-Perigäum-Rechner (Datum, deutsch, UTC)
 // - Sonne: Erd-Perihel = Minimum der Sonnen-Distanz im Kalenderjahr
-// - Merkur–Pluto + Chiron: pro rückläufiger Phase genau 1 Perigäum (Distanzminimum)
-// Robust gegen Stationen: Retro-Erkennung mit Hysterese + Epsilon (keine Fenster-Zerhackung)
+// - Merkur–Pluto + Chiron: pro rückläufiger Phase genau 1 Distanzminimum
+// Rückläufigkeit wird direkt aus Swiss Ephemeris SPEED bestimmt (pos[3])
 
 import SwissEph from "swisseph-wasm";
 
@@ -59,14 +59,7 @@ function formatDateDE({ year, month, day }) {
   return `${dd}.${mm}.${year}`;
 }
 
-// ---------------- Math helpers ----------------
-function normDeltaDeg(d) {
-  let x = ((d + 540) % 360) - 180;
-  if (x === -180) x = 180;
-  return x;
-}
-
-// Golden section minimum
+// ---------------- Golden section minimum ----------------
 function goldenMin(f, a, b, tolDays) {
   const gr = (Math.sqrt(5) - 1) / 2;
   let c = b - gr * (b - a);
@@ -111,55 +104,53 @@ function minDistanceInWindow(getDist, a, b) {
 
 // ---------------- SwissEph access ----------------
 function makeCalc(swe, bodyId) {
-  const flags = swe.SEFLG_SWIEPH; // ohne SEFLG_SPEED (WASM stabil)
+  // WICHTIG: mit SPEED, damit wir Retro sauber erkennen können
+  const flags = swe.SEFLG_SWIEPH | swe.SEFLG_SPEED;
+
   return {
     getDist(jd) {
       const pos = swe.calc_ut(jd, bodyId, flags);
       return pos[2]; // AU
     },
-    getLon(jd) {
+    getSpeedLon(jd) {
       const pos = swe.calc_ut(jd, bodyId, flags);
-      return pos[0]; // deg
+      return pos[3]; // deg/day (ekl. Länge)
     }
   };
 }
 
-// Retro-Fenster (Hysterese + Epsilon):
-// - Eintritt erst nach N retro-Schritten in Folge
-// - Austritt erst nach N direkten Schritten in Folge
-// - winzige dLon (nahe 0) zählen NICHT als Richtungswechsel (Stationen)
-function findRetroWindows(getLon, jdStart, jdEnd) {
+// Retro-Fenster über SPEED (robust um Stationen):
+// - retro wenn speedLon < -eps
+// - direkt wenn speedLon > +eps
+// - |speedLon| <= eps = Station/neutral -> zählt nicht als Umschalten
+function findRetroWindowsBySpeed(getSpeedLon, jdStart, jdEnd) {
   const step = 0.125; // 3h
   const need = 3;     // 3 Schritte ~ 9h Stabilität
-  const eps  = 1e-4;  // 0.0001° ~ 0.36" (gegen Station-Flattern)
+
+  // eps in deg/day: sehr klein, aber nicht 0 (Stationen)
+  // 1e-5 deg/day ~ 0.036" pro Tag (extrem klein) -> konservativ
+  const eps = 1e-5;
 
   const windows = [];
-  let prevJd = jdStart;
-  let prevLon = getLon(prevJd);
-
   let inRetro = false;
   let startJd = null;
 
   let retroStreak = 0;
   let directStreak = 0;
 
-  for (let jd = jdStart + step; jd <= jdEnd + 1e-9; jd += step) {
+  for (let jd = jdStart; jd <= jdEnd + 1e-9; jd += step) {
     const curJd = Math.min(jd, jdEnd);
-    const curLon = getLon(curJd);
+    const v = getSpeedLon(curJd);
 
-    const dLon = normDeltaDeg(curLon - prevLon);
-
-    // Station/Winzigkeit: neutral -> Streaks NICHT verändern
-    if (Math.abs(dLon) <= eps) {
-      prevJd = curJd;
-      prevLon = curLon;
+    // Station/neutral: nicht als Richtungswechsel zählen
+    if (Math.abs(v) <= eps) {
       if (curJd >= jdEnd) break;
       continue;
     }
 
-    const isRetroStep = dLon < 0;
+    const isRetro = v < 0;
 
-    if (isRetroStep) {
+    if (isRetro) {
       retroStreak++;
       directStreak = 0;
     } else {
@@ -179,9 +170,6 @@ function findRetroWindows(getLon, jdStart, jdEnd) {
       startJd = null;
     }
 
-    prevJd = curJd;
-    prevLon = curLon;
-
     if (curJd >= jdEnd) break;
   }
 
@@ -189,7 +177,6 @@ function findRetroWindows(getLon, jdStart, jdEnd) {
     windows.push([startJd, jdEnd]);
   }
 
-  // sehr kurze Artefakte entfernen (> 1 Tag)
   return windows.filter(([a, b]) => (b - a) > 1.0);
 }
 
@@ -217,8 +204,8 @@ export default async function handler(req, res) {
     const jdYearStart = swe.julday(year, 1, 1, 0.0);
     const jdYearEnd   = swe.julday(year + 1, 1, 1, 0.0);
 
-    // Puffer für Retro-Fenster über Jahreswechsel
-    const pad = 7;
+    // Puffer über Jahreswechsel
+    const pad = 20; // etwas größer als 7, damit Stationen nicht "abgeschnitten" werden
     const jdCalcStart = jdYearStart - pad;
     const jdCalcEnd   = jdYearEnd + pad;
 
@@ -227,30 +214,29 @@ export default async function handler(req, res) {
 
     for (const body of BODIES) {
       const bodyId = swe[body.id];
-      const { getDist, getLon } = makeCalc(swe, bodyId);
+      const { getDist, getSpeedLon } = makeCalc(swe, bodyId);
 
       let perigees = [];
 
       if (body.mode === "SUN") {
-        // Sonne: Perihel (Minimum Distanz) IM Kalenderjahr
         const jdMin = minDistanceInWindow(getDist, jdYearStart, jdYearEnd);
         const cal = jdToCalendar(jdMin);
         perigees = [{ datum: formatDateDE(cal) }];
       } else {
-        // pro rückläufiger Phase genau 1 Distanzminimum
-        const windows = findRetroWindows(getLon, jdCalcStart, jdCalcEnd);
+        // Retrofenster über SPEED
+        const windows = findRetroWindowsBySpeed(getSpeedLon, jdCalcStart, jdCalcEnd);
 
         for (const [a0, b0] of windows) {
           const jdMin = minDistanceInWindow(getDist, a0, b0);
 
-          // Ausgabe nur wenn das Ereignis physikalisch im Jahresintervall liegt
+          // Ausgabe nur wenn Ereignis im Kalenderjahr liegt
           if (jdMin >= jdYearStart && jdMin < jdYearEnd) {
             const cal = jdToCalendar(jdMin);
             perigees.push({ datum: formatDateDE(cal) });
           }
         }
 
-        // Duplikate (durch Rundung auf Tag) entfernen
+        // Duplikate entfernen (Tag-Rundung)
         const seen = new Set();
         perigees = perigees.filter((p) => {
           if (seen.has(p.datum)) return false;
@@ -289,3 +275,4 @@ export default async function handler(req, res) {
     try { swe.close(); } catch (_) {}
   }
 }
+
