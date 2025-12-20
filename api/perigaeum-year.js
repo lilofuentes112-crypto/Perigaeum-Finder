@@ -2,7 +2,7 @@
 // Jahres-Perigäum-Rechner (Datum, deutsch, UTC)
 //
 // - Sonne: Erd-Perihel = Minimum der Sonnen-Distanz im Kalenderjahr
-// - Merkur–Pluto: pro rückläufiger Phase genau 1 Perigäum (Distanzminimum)
+// - Merkur–Pluto (und die restlichen Planeten hier): pro rückläufiger Phase genau 1 Perigäum (Distanzminimum)
 // - Chiron: Astronomisch sauberer Sonderfall:
 //   -> Suche globales Distanzminimum im erweiterten Fenster (Jahr ± Pad).
 //   -> Nur wenn das Minimum IM Kalenderjahr liegt, wird es als Perigäum ausgegeben.
@@ -115,7 +115,6 @@ function globalMinWithPad(getDist, jdYearStart, jdYearEnd, padDays) {
   const a = jdYearStart - padDays;
   const b = jdYearEnd + padDays;
 
-  // grobes Raster über das ganze Fenster
   const coarseStep = 0.25; // 6h
   let bestJd = a;
   let bestD = getDist(a);
@@ -129,7 +128,6 @@ function globalMinWithPad(getDist, jdYearStart, jdYearEnd, padDays) {
     }
   }
 
-  // Feinsuche um bestJd
   const left  = Math.max(a, bestJd - 5.0);
   const right = Math.min(b, bestJd + 5.0);
   const tol = 1 / 1440; // 1 Minute
@@ -140,14 +138,29 @@ function globalMinWithPad(getDist, jdYearStart, jdYearEnd, padDays) {
 }
 
 // ---------------- SwissEph access ----------------
+function normalizeCalcUtResult(raw) {
+  // raw kann sein: Array, Float64Array, oder { data: ... }
+  if (!raw) return null;
+
+  // Array oder TypedArray direkt ok
+  if (Array.isArray(raw) || ArrayBuffer.isView(raw)) return raw;
+
+  // Objekt mit .data
+  if (raw.data && (Array.isArray(raw.data) || ArrayBuffer.isView(raw.data))) {
+    return raw.data;
+  }
+
+  return null;
+}
+
 function makeCalc(swe, bodyId) {
   const flags = swe.SEFLG_SWIEPH | swe.SEFLG_SPEED;
 
   function safeCalcUt(jd) {
-    const pos = swe.calc_ut(jd, bodyId, flags);
-    // Bei Problemen kann pos "undefined" oder kein Array sein.
-    if (!pos || !Array.isArray(pos) || pos.length < 4) {
-      throw new Error("calc_ut lieferte kein gültiges Array");
+    const raw = swe.calc_ut(jd, bodyId, flags);
+    const pos = normalizeCalcUtResult(raw);
+    if (!pos || typeof pos.length !== "number" || pos.length < 4) {
+      throw new Error("calc_ut lieferte kein gültiges Array/TypedArray");
     }
     return pos;
   }
@@ -248,7 +261,6 @@ export default async function handler(req, res) {
     // 2) Ephemeridenpfad setzen – DEIN Ordner liegt unter api/ephe
     const ephePath = path.join(process.cwd(), "api", "ephe");
 
-    // Wichtig: NICHT awaiten. Und: je nach Build heißt es set_ephe_path oder swe_set_ephe_path.
     if (typeof swe.set_ephe_path === "function") {
       swe.set_ephe_path(ephePath);
     } else if (typeof swe.swe_set_ephe_path === "function") {
@@ -264,7 +276,7 @@ export default async function handler(req, res) {
     const jdYearStart = swe.julday(year, 1, 1, 0.0, swe.SE_GREG_CAL);
     const jdYearEnd   = swe.julday(year + 1, 1, 1, 0.0, swe.SE_GREG_CAL);
 
-    // Puffer für Retro-Fenster über Jahreswechsel (Planeten)
+    // Puffer für Retro-Fenster über Jahreswechsel
     const padRetro = 20;
     const jdCalcStart = jdYearStart - padRetro;
     const jdCalcEnd   = jdYearEnd + padRetro;
@@ -283,18 +295,15 @@ export default async function handler(req, res) {
 
         let perigees = [];
         let info = null;
-        let labelOverride = null;
 
         if (body.mode === "SUN") {
           const jdMin = minDistanceInWindow(getDist, jdYearStart, jdYearEnd);
           perigees = [{ datum: formatDateDE(jdToCalendar(jdMin)) }];
 
         } else if (body.mode === "CHIRON_GLOBAL") {
-          // Chiron: globales Minimum im erweiterten Fenster, nur wenn Minimum im Jahr liegt
-          const padChiron = 60; // ± 60 Tage (konservativ, sauber)
+          // Chiron: globales Distanzminimum in erweitertem Fenster
+          const padChiron = 60; // ± 60 Tage
           const { jdMin, inYear } = globalMinWithPad(getDist, jdYearStart, jdYearEnd, padChiron);
-
-          labelOverride = "Chiron";
           if (inYear) {
             perigees = [{ datum: formatDateDE(jdToCalendar(jdMin)) }];
           } else {
@@ -303,7 +312,7 @@ export default async function handler(req, res) {
           }
 
         } else {
-          // Planeten: pro rückläufiger Phase genau 1 Distanzminimum (wie bisher)
+          // Planeten: Retro-Fenster -> Minimum je Fenster
           const windows = findRetroWindows(getLonSpeed, jdCalcStart, jdCalcEnd);
 
           for (const [a0, b0] of windows) {
@@ -321,19 +330,21 @@ export default async function handler(req, res) {
             return true;
           });
 
-          if (perigees.length === 0) info = "Kein Perigäum in diesem Jahr";
+          if (perigees.length === 0) {
+            info = "Kein Perigäum in diesem Jahr";
+          }
         }
 
         if (perigees.length > 0) totalCount += perigees.length;
 
         results.push({
-          body: labelOverride || body.name,
+          body: body.name,
           perigees,
           info
         });
 
       } catch (err) {
-        // Ganz wichtig: Fehler bei einem Körper darf nicht alles killen.
+        // Körper-spezifischer Fehler darf NICHT alles killen.
         results.push({
           body: body.name,
           perigees: [],
