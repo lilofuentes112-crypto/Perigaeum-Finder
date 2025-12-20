@@ -3,20 +3,23 @@
 //
 // - Sonne: Erd-Perihel = Minimum der Sonnen-Distanz im Kalenderjahr
 // - Merkur–Pluto: pro rückläufiger Phase genau 1 Perigäum (Distanzminimum)
-// - Chiron: globales Distanzminimum im erweiterten Fenster (Jahr ± Pad),
-//           nur wenn Minimum IM Kalenderjahr liegt -> Datum, sonst "Kein Perigäum in diesem Jahr".
+// - Chiron: Sonderfall (geozentrische Distanz sauber erzwingen):
+//   -> Distanz wird NICHT aus pos[2] genommen, sondern aus heliozentrischen XYZ-Vektoren:
+//      Dist(Erde, Chiron) = |r_chiron(hel) - r_erde(hel)|
+//   -> Suche globales Distanzminimum im erweiterten Fenster (Jahr ± Pad).
+//   -> Nur wenn das Minimum IM Kalenderjahr liegt, wird es als Perigäum ausgegeben.
+//   -> Sonst: "Kein Perigäum in diesem Jahr".
 //
-// Zusätzlich eingebaut (wie verlangt):
+// Zusätzlich eingebaut:
 // - DEBUG: zeigt, ob api/ephe in der Vercel-Function wirklich existiert + Dateiliste
-// - DEBUG: zeigt für Chiron ein paar Distanz-Samples + das gefundene globale Minimum (JD + Datum + inYear)
-// - Robustheit: Mode wird normalisiert (trim/uppercase), damit keine unsichtbaren Zeichen die Logik killen
-// - Robustheit: Distanz/Speed validieren (finite, >0)
+// - DEBUG: zeigt für Chiron Distanz-Samples + gefundenes globales Minimum (JD + Datum + inYear)
+// - Robustheit: Mode wird normalisiert (trim/uppercase)
 
 import SwissEph from "swisseph-wasm";
 import path from "path";
 import fs from "fs";
 
-const BUILD_ID = "2025-12-20-CHIRON-YEARMIN-1";
+const BUILD_ID = "2025-12-20-CHIRON-FIX-GEOXYZ-1";
 
 export const config = { runtime: "nodejs" };
 
@@ -172,19 +175,61 @@ function makeCalc(swe, bodyId) {
   return {
     getDist(jd) {
       const pos = safeCalcUt(jd);
-      const d = pos[2]; // Distanz (AU)
-      if (!Number.isFinite(d) || d <= 0) {
-        throw new Error(`Ungültige Distanz: ${String(d)}`);
-      }
+      const d = pos[2];
+      if (!Number.isFinite(d) || d <= 0) throw new Error(`Ungültige Distanz: ${String(d)}`);
       return d;
     },
     getLonSpeed(jd) {
       const pos = safeCalcUt(jd);
-      const sp = pos[3]; // Längengeschwindigkeit (deg/day)
-      if (!Number.isFinite(sp)) {
-        throw new Error(`Ungültige Speed: ${String(sp)}`);
-      }
+      const sp = pos[3];
+      if (!Number.isFinite(sp)) throw new Error(`Ungültige Speed: ${String(sp)}`);
       return sp;
+    }
+  };
+}
+
+// --- FIX: Geozentrische Distanz via heliozentrische XYZ-Vektoren erzwingen ---
+function makeGeoDistFromHelioXYZ(swe, bodyId) {
+  const flagsXYZHel =
+    swe.SEFLG_SWIEPH |
+    swe.SEFLG_XYZ |
+    swe.SEFLG_HELCTR; // heliozentrisch, kartesisch
+
+  const earthId = swe.SE_EARTH;
+  if (typeof earthId !== "number") {
+    throw new Error("SE_EARTH Konstante fehlt (SwissEph-Version/Build prüfen).");
+  }
+
+  function safeCalcUtXYZHel(jd, id) {
+    let raw;
+    try {
+      raw = swe.calc_ut(jd, id, flagsXYZHel);
+    } catch (e) {
+      throw new Error(`calc_ut(XYZ/HEL) Exception: ${String(e?.message || e)}`);
+    }
+    const pos = normalizeCalcUtResult(raw);
+    if (!pos || typeof pos.length !== "number" || pos.length < 3) {
+      throw new Error("calc_ut(XYZ/HEL) lieferte kein gültiges Array/TypedArray");
+    }
+    const x = pos[0], y = pos[1], z = pos[2];
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
+      throw new Error("Ungültige XYZ Werte (NaN/Infinity) bei calc_ut(XYZ/HEL)");
+    }
+    return { x, y, z };
+  }
+
+  return {
+    getGeoDistAU(jd) {
+      const b = safeCalcUtXYZHel(jd, bodyId);
+      const e = safeCalcUtXYZHel(jd, earthId);
+      const dx = b.x - e.x;
+      const dy = b.y - e.y;
+      const dz = b.z - e.z;
+      const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      if (!Number.isFinite(d) || d <= 0) {
+        throw new Error(`Ungültige GEO-Distanz aus XYZ: ${String(d)}`);
+      }
+      return d;
     }
   };
 }
@@ -320,8 +365,6 @@ export default async function handler(req, res) {
           throw new Error(`Unbekannte SwissEph-Konstante: ${body.id}`);
         }
 
-        const { getDist, getLonSpeed } = makeCalc(swe, bodyId);
-
         let perigees = [];
         let info = null;
 
@@ -329,47 +372,51 @@ export default async function handler(req, res) {
         const mode = String(body.mode || "").trim().toUpperCase();
 
         if (mode === "SUN") {
+          // Sonne: Distanz ist ok aus Standard-calc (pos[2]) (funktioniert bei dir bereits)
+          const { getDist } = makeCalc(swe, bodyId);
           const jdMin = minDistanceInWindow(getDist, jdYearStart, jdYearEnd);
           perigees = [{ datum: formatDateDE(jdToCalendar(jdMin)) }];
 
         } else if (mode === "CHIRON_GLOBAL") {
-          const padChiron = 60; // ± 60 Tage
+          // CHIRON FIX: geozentrische Distanz via heliozentrische XYZ erzwingen
+          const geo = makeGeoDistFromHelioXYZ(swe, bodyId);
+          const getDist = (jd) => geo.getGeoDistAU(jd);
+
+          // Pad größer, damit ein echtes Minimum (nicht Randartefakt) zuverlässig im Suchfenster liegt
+          const padChiron = 400; // ± 400 Tage
+
           const { jdMin, inYear } = globalMinWithPad(getDist, jdYearStart, jdYearEnd, padChiron);
 
-          // DEBUG: ein paar Samples + Ergebnis
-          if (body.id === "SE_CHIRON") {
-            const sampleJds = [
-              jdYearStart,
-              jdYearStart + 30,
-              jdYearStart + 120,
-              jdYearStart + 240,
-              jdYearEnd - 1
-            ];
-            const samples = sampleJds.map((jd) => {
-              let d = null, sp = null, err = null;
-              try { d = getDist(jd); } catch (e) { err = String(e?.message || e); }
-              try { sp = getLonSpeed(jd); } catch (e) { err = err || String(e?.message || e); }
-              return {
-                jd,
-                datum: formatDateDE(jdToCalendar(jd)),
-                distAU: d,
-                lonSpeed: sp,
-                error: err
-              };
-            });
-
-            chironDebug = {
-              modeRaw: body.mode,
-              modeNormalized: mode,
-              padDays: padChiron,
-              globalMin: {
-                jdMin,
-                datum: formatDateDE(jdToCalendar(jdMin)),
-                inYear
-              },
-              samples
+          // DEBUG: Samples + Ergebnis
+          const sampleJds = [
+            jdYearStart,
+            jdYearStart + 30,
+            jdYearStart + 120,
+            jdYearStart + 240,
+            jdYearEnd - 1
+          ];
+          const samples = sampleJds.map((jd) => {
+            let d = null, err = null;
+            try { d = getDist(jd); } catch (e) { err = String(e?.message || e); }
+            return {
+              jd,
+              datum: formatDateDE(jdToCalendar(jd)),
+              geoDistAU: d,
+              error: err
             };
-          }
+          });
+
+          chironDebug = {
+            modeRaw: body.mode,
+            modeNormalized: mode,
+            padDays: padChiron,
+            globalMin: {
+              jdMin,
+              datum: formatDateDE(jdToCalendar(jdMin)),
+              inYear
+            },
+            samples
+          };
 
           if (inYear) {
             perigees = [{ datum: formatDateDE(jdToCalendar(jdMin)) }];
@@ -380,6 +427,7 @@ export default async function handler(req, res) {
 
         } else {
           // Planeten: Retro-Fenster -> Minimum je Fenster
+          const { getDist, getLonSpeed } = makeCalc(swe, bodyId);
           const windows = findRetroWindows(getLonSpeed, jdCalcStart, jdCalcEnd);
 
           for (const [a0, b0] of windows) {
@@ -397,9 +445,7 @@ export default async function handler(req, res) {
             return true;
           });
 
-          if (perigees.length === 0) {
-            info = "Kein Perigäum in diesem Jahr";
-          }
+          if (perigees.length === 0) info = "Kein Perigäum in diesem Jahr";
         }
 
         if (perigees.length > 0) totalCount += perigees.length;
