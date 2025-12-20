@@ -7,6 +7,9 @@
 import SwissEph from "swisseph-wasm";
 import path from "path";
 
+// Falls Vercel/Next irrtümlich Edge nimmt: erzwinge Node (schadet sonst nicht)
+export const config = { runtime: "nodejs" };
+
 const BODIES = [
   { id: "SE_SUN",     name: "Sonne",   mode: "SUN"   },
   { id: "SE_MERCURY", name: "Merkur",  mode: "RETRO" },
@@ -105,13 +108,12 @@ function minDistanceInWindow(getDist, a, b) {
 
 // ---------------- SwissEph access ----------------
 function makeCalc(swe, bodyId) {
-  // Mit SPEED: Retro direkt über Geschwindigkeitsvorzeichen (deg/day)
   const flags = swe.SEFLG_SWIEPH | swe.SEFLG_SPEED;
 
   return {
     getDist(jd) {
       const pos = swe.calc_ut(jd, bodyId, flags);
-      return pos[2]; // Distanz (AU) geozentrisch
+      return pos[2]; // Distanz (AU)
     },
     getLonSpeed(jd) {
       const pos = swe.calc_ut(jd, bodyId, flags);
@@ -120,13 +122,11 @@ function makeCalc(swe, bodyId) {
   };
 }
 
-// Retro-Fenster (Hysterese):
-// - Eintritt erst nach N retro-Schritten in Folge
-// - Austritt erst nach N direkten Schritten in Folge
+// Retro-Fenster (Hysterese)
 function findRetroWindows(getLonSpeed, jdStart, jdEnd) {
   const step = 0.125; // 3h
   const need = 3;     // 9h Stabilität
-  const epsSpeed = 1e-6; // deg/day: neutraler Bereich um 0 (Station)
+  const epsSpeed = 1e-6;
 
   const windows = [];
   let inRetro = false;
@@ -138,7 +138,6 @@ function findRetroWindows(getLonSpeed, jdStart, jdEnd) {
     const curJd = Math.min(jd, jdEnd);
     const sp = getLonSpeed(curJd);
 
-    // Station/nahe 0: nicht als Richtungswechsel zählen
     if (Math.abs(sp) <= epsSpeed) {
       if (curJd >= jdEnd) break;
       continue;
@@ -173,7 +172,6 @@ function findRetroWindows(getLonSpeed, jdStart, jdEnd) {
     windows.push([startJd, jdEnd]);
   }
 
-  // Artefakte entfernen (zu kurz)
   return windows.filter(([a, b]) => (b - a) > 1.0);
 }
 
@@ -195,21 +193,38 @@ export default async function handler(req, res) {
       });
     }
 
-    // >>> WICHTIG: Ephemeriden-Pfad setzen VOR initSwissEph() <<<
-    // Du hast die Dateien im Repo unter: api/ephe/
-    // process.cwd() ist bei Vercel/Serverless das Deploy-Root
-    const ephePath = path.join(process.cwd(), "api", "ephe");
-    swe.set_ephe_path(ephePath);
-
-    // Danach initialisieren
+    // 1) WASM initialisieren
     await swe.initSwissEph();
+
+    // Sicherheitscheck: wenn das fehlschlägt, kommt genau der ccall-Fehler später
+    if (typeof swe.calc_ut !== "function") {
+      return res.status(500).json({
+        ok: false,
+        error: "SwissEph init fehlgeschlagen (calc_ut nicht verfügbar). Prüfe Vercel Runtime (Node, nicht Edge)."
+      });
+    }
+
+    // 2) Ephemeridenpfad setzen – DEIN Ordner liegt unter api/ephe
+    const ephePath = path.join(process.cwd(), "api", "ephe");
+
+    // Wichtig: NICHT awaiten. Und: je nach Build heißt es set_ephe_path oder swe_set_ephe_path.
+    if (typeof swe.set_ephe_path === "function") {
+      swe.set_ephe_path(ephePath);
+    } else if (typeof swe.swe_set_ephe_path === "function") {
+      swe.swe_set_ephe_path(ephePath);
+    } else {
+      return res.status(500).json({
+        ok: false,
+        error: "SwissEph hat keine set_ephe_path/swe_set_ephe_path Methode. Paketversion prüfen."
+      });
+    }
 
     // Exakt das Kalenderjahr (UTC)
     const jdYearStart = swe.julday(year, 1, 1, 0.0, swe.SE_GREG_CAL);
     const jdYearEnd   = swe.julday(year + 1, 1, 1, 0.0, swe.SE_GREG_CAL);
 
     // Puffer für Retro-Fenster über Jahreswechsel
-    const pad = 20; // etwas großzügiger für Langsamläufer
+    const pad = 20;
     const jdCalcStart = jdYearStart - pad;
     const jdCalcEnd   = jdYearEnd + pad;
 
@@ -223,22 +238,18 @@ export default async function handler(req, res) {
       let perigees = [];
 
       if (body.mode === "SUN") {
-        // Sonne: Perihel (Minimum Distanz) im Kalenderjahr
         const jdMin = minDistanceInWindow(getDist, jdYearStart, jdYearEnd);
         perigees = [{ datum: formatDateDE(jdToCalendar(jdMin)) }];
       } else {
-        // Pro rückläufiger Phase genau 1 Distanzminimum
         const windows = findRetroWindows(getLonSpeed, jdCalcStart, jdCalcEnd);
 
         for (const [a0, b0] of windows) {
           const jdMin = minDistanceInWindow(getDist, a0, b0);
-
           if (jdMin >= jdYearStart && jdMin < jdYearEnd) {
             perigees.push({ datum: formatDateDE(jdToCalendar(jdMin)) });
           }
         }
 
-        // Duplikate (durch Rundung auf Tag) entfernen
         const seen = new Set();
         perigees = perigees.filter((p) => {
           if (seen.has(p.datum)) return false;
@@ -248,18 +259,10 @@ export default async function handler(req, res) {
       }
 
       if (perigees.length === 0) {
-        results.push({
-          body: body.name,
-          perigees: [],
-          info: "Kein Perigäum in diesem Jahr"
-        });
+        results.push({ body: body.name, perigees: [], info: "Kein Perigäum in diesem Jahr" });
       } else {
         totalCount += perigees.length;
-        results.push({
-          body: body.name,
-          perigees,
-          info: null
-        });
+        results.push({ body: body.name, perigees, info: null });
       }
     }
 
@@ -274,6 +277,7 @@ export default async function handler(req, res) {
     console.error("Perigäum-Fehler:", e);
     return res.status(500).json({ ok: false, error: String(e) });
   } finally {
-    try { swe.close(); } catch (_) {}
+    // close() ist optional; falls es intern wieder ccall braucht und irgendwas schief war:
+    try { if (typeof swe.close === "function") swe.close(); } catch (_) {}
   }
 }
