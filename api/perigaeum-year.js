@@ -1,8 +1,13 @@
 // api/perigaeum-year.js
 // Jahres-Perigäum-Rechner (Datum, deutsch, UTC)
-// - Sonne: Erd-Perihel = Minimum der Sonnen-Distanz im Kalenderjahr
-// - Merkur–Pluto + Chiron: pro rückläufiger Phase genau 1 Perigäum (Distanzminimum)
-// Retro-Erkennung über SwissEphemeris SPEED (robust, kein Station-Flattern per dLon)
+//
+// Definitionen (wichtig, für Seriosität):
+// - Sonne: Jahresminimum der Erd-Sonnen-Distanz (geozentrisch = heliozentrische Erdbahndistanz)
+// - Merkur–Pluto: pro rückläufiger Phase genau 1 geozentrisches Distanzminimum (innerhalb der Retro-Phase)
+// - Chiron: NICHT "pro Rückläufigkeit" (astronomisch nicht haltbar) → stattdessen:
+//           Jahresminimum der geozentrischen Distanz im Kalenderjahr (UTC)
+//
+// Retro-Erkennung: über SwissEphemeris SPEED (robust, kein Station-Flattern per dLon)
 
 import SwissEph from "swisseph-wasm";
 import path from "path";
@@ -11,16 +16,17 @@ import path from "path";
 export const config = { runtime: "nodejs" };
 
 const BODIES = [
-  { id: "SE_SUN",     name: "Sonne",   mode: "SUN"   },
-  { id: "SE_MERCURY", name: "Merkur",  mode: "RETRO" },
-  { id: "SE_VENUS",   name: "Venus",   mode: "RETRO" },
-  { id: "SE_MARS",    name: "Mars",    mode: "RETRO" },
-  { id: "SE_JUPITER", name: "Jupiter", mode: "RETRO" },
-  { id: "SE_SATURN",  name: "Saturn",  mode: "RETRO" },
-  { id: "SE_CHIRON",  name: "Chiron",  mode: "RETRO" },
-  { id: "SE_URANUS",  name: "Uranus",  mode: "RETRO" },
-  { id: "SE_NEPTUNE", name: "Neptun",  mode: "RETRO" },
-  { id: "SE_PLUTO",   name: "Pluto",   mode: "RETRO" }
+  { id: "SE_SUN",     name: "Sonne",                         mode: "SUN"     },
+  { id: "SE_MERCURY", name: "Merkur",                        mode: "RETRO"   },
+  { id: "SE_VENUS",   name: "Venus",                         mode: "RETRO"   },
+  { id: "SE_MARS",    name: "Mars",                          mode: "RETRO"   },
+  { id: "SE_JUPITER", name: "Jupiter",                       mode: "RETRO"   },
+  { id: "SE_SATURN",  name: "Saturn",                        mode: "RETRO"   },
+  // Wichtig: Chiron NICHT wie Planet behandeln
+  { id: "SE_CHIRON",  name: "Chiron (Jahresminimum Distanz)", mode: "YEARMIN" },
+  { id: "SE_URANUS",  name: "Uranus",                        mode: "RETRO"   },
+  { id: "SE_NEPTUNE", name: "Neptun",                        mode: "RETRO"   },
+  { id: "SE_PLUTO",   name: "Pluto",                         mode: "RETRO"   }
 ];
 
 // ---------------- CORS ----------------
@@ -94,7 +100,7 @@ function minDistanceInWindow(getDist, a, b) {
   for (let jd = a; jd <= b + 1e-9; jd += coarseStep) {
     const j = Math.min(jd, b);
     const d = getDist(j);
-    if (Number.isFinite(d) && (!Number.isFinite(bestD) || d < bestD)) {
+    if (d < bestD) {
       bestD = d;
       bestJd = j;
     }
@@ -107,31 +113,17 @@ function minDistanceInWindow(getDist, a, b) {
 }
 
 // ---------------- SwissEph access ----------------
-// WICHTIG: Bei fehlenden Ephemeriden (z.B. Chiron ohne seas_15.se1) liefert SwissEph
-// entweder Fehler oder NaN. Das fangen wir ab, damit nicht "0 Termine" entsteht, sondern
-// eine klare Info.
 function makeCalc(swe, bodyId) {
-  const flagsDist  = swe.SEFLG_SWIEPH;                 // Distanz reicht ohne SPEED
-  const flagsSpeed = swe.SEFLG_SWIEPH | swe.SEFLG_SPEED;
+  const flags = swe.SEFLG_SWIEPH | swe.SEFLG_SPEED;
 
   return {
     getDist(jd) {
-      try {
-        const pos = swe.calc_ut(jd, bodyId, flagsDist);
-        const r = pos?.[2];
-        return Number.isFinite(r) ? r : NaN;
-      } catch (_) {
-        return NaN;
-      }
+      const pos = swe.calc_ut(jd, bodyId, flags);
+      return pos[2]; // Distanz (AU), geozentrisch
     },
     getLonSpeed(jd) {
-      try {
-        const pos = swe.calc_ut(jd, bodyId, flagsSpeed);
-        const sp = pos?.[3];
-        return Number.isFinite(sp) ? sp : NaN;
-      } catch (_) {
-        return NaN;
-      }
+      const pos = swe.calc_ut(jd, bodyId, flags);
+      return pos[3]; // Längengeschwindigkeit (deg/day)
     }
   };
 }
@@ -151,12 +143,6 @@ function findRetroWindows(getLonSpeed, jdStart, jdEnd) {
   for (let jd = jdStart; jd <= jdEnd + 1e-9; jd += step) {
     const curJd = Math.min(jd, jdEnd);
     const sp = getLonSpeed(curJd);
-
-    // wenn Speed nicht berechenbar ist -> keine Retro-Fenster möglich
-    if (!Number.isFinite(sp)) {
-      if (curJd >= jdEnd) break;
-      continue;
-    }
 
     if (Math.abs(sp) <= epsSpeed) {
       if (curJd >= jdEnd) break;
@@ -219,16 +205,14 @@ export default async function handler(req, res) {
     if (typeof swe.calc_ut !== "function") {
       return res.status(500).json({
         ok: false,
-        error:
-          "SwissEph init fehlgeschlagen (calc_ut nicht verfügbar). Prüfe Vercel Runtime (Node, nicht Edge)."
+        error: "SwissEph init fehlgeschlagen (calc_ut nicht verfügbar). Prüfe Vercel Runtime (Node, nicht Edge)."
       });
     }
 
-    // 2) Ephemeridenpfad setzen – DEIN Ordner liegt unter api/ephe
-    // (Das ist korrekt für dein Repo-Layout.)
+    // 2) Ephemeridenpfad setzen – deine Dateien liegen unter api/ephe
     const ephePath = path.join(process.cwd(), "api", "ephe");
 
-    // Wichtig: nicht awaiten (swisseph-wasm ist hier synchron)
+    // NICHT awaiten (je nach Build ist es sync). Und: je nach Paketname set_ephe_path oder swe_set_ephe_path.
     if (typeof swe.set_ephe_path === "function") {
       swe.set_ephe_path(ephePath);
     } else if (typeof swe.swe_set_ephe_path === "function") {
@@ -256,38 +240,25 @@ export default async function handler(req, res) {
       const bodyId = swe[body.id];
       const { getDist, getLonSpeed } = makeCalc(swe, bodyId);
 
-      // HARTE PLAUSI-PRÜFUNG: kann SwissEph diesen Körper überhaupt rechnen?
-      // (Bei Chiron fehlt sonst fast immer seas_15.se1 im ephe-Ordner.)
-      const testDist = getDist(jdYearStart);
-      const testSpd  = (body.mode === "RETRO") ? getLonSpeed(jdYearStart) : 0;
-
-      if (!Number.isFinite(testDist) || (body.mode === "RETRO" && !Number.isFinite(testSpd))) {
-        results.push({
-          body: body.name,
-          perigees: [],
-          info:
-            body.id === "SE_CHIRON"
-              ? "Chiron nicht berechenbar: sehr wahrscheinlich fehlt die Ephemeriden-Datei seas_15.se1 im Ordner api/ephe."
-              : "Planet/Körper nicht berechenbar: Ephemeriden-Dateien fehlen oder ephePath stimmt nicht."
-        });
-        continue;
-      }
-
       let perigees = [];
 
       if (body.mode === "SUN") {
-        // Sonne: Perihel (Minimum Distanz) im Kalenderjahr
+        // Sonne: Jahresminimum der Distanz im Kalenderjahr
         const jdMin = minDistanceInWindow(getDist, jdYearStart, jdYearEnd);
-        if (Number.isFinite(jdMin)) {
-          perigees = [{ datum: formatDateDE(jdToCalendar(jdMin)) }];
-        }
+        perigees = [{ datum: formatDateDE(jdToCalendar(jdMin)) }];
+
+      } else if (body.mode === "YEARMIN") {
+        // Chiron: astronomisch seriös = Jahresminimum der geozentrischen Distanz
+        const jdMin = minDistanceInWindow(getDist, jdYearStart, jdYearEnd);
+        perigees = [{ datum: formatDateDE(jdToCalendar(jdMin)) }];
+
       } else {
-        // Pro rückläufiger Phase genau 1 Distanzminimum
+        // Merkur–Pluto: pro rückläufiger Phase genau 1 Distanzminimum
         const windows = findRetroWindows(getLonSpeed, jdCalcStart, jdCalcEnd);
 
         for (const [a0, b0] of windows) {
           const jdMin = minDistanceInWindow(getDist, a0, b0);
-          if (Number.isFinite(jdMin) && jdMin >= jdYearStart && jdMin < jdYearEnd) {
+          if (jdMin >= jdYearStart && jdMin < jdYearEnd) {
             perigees.push({ datum: formatDateDE(jdToCalendar(jdMin)) });
           }
         }
@@ -305,7 +276,7 @@ export default async function handler(req, res) {
         results.push({
           body: body.name,
           perigees: [],
-          info: "Kein Perigäum in diesem Jahr"
+          info: "Kein Termin in diesem Jahr"
         });
       } else {
         totalCount += perigees.length;
