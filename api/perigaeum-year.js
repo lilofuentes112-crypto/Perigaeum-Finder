@@ -1,10 +1,8 @@
 // api/perigaeum-year.js
 // Jahres-Perigäum-Rechner (Datum, deutsch, UTC)
-//
-// Astronomisch korrekt:
-// Perigäum = lokales Minimum der geozentrischen Distanz r(t)
-// <=> dr/dt wechselt von NEGATIV zu POSITIV
-// dr/dt wird hier numerisch aus r(t) berechnet (robust, unabhängig von pos[5]).
+// - Sonne: Erd-Perihel = Minimum der Sonnen-Distanz im Kalenderjahr
+// - Merkur–Pluto + Chiron: pro rückläufiger Phase genau 1 Perigäum (Distanzminimum)
+// Retro-Erkennung über SwissEphemeris SPEED (robust, kein Station-Flattern per dLon)
 
 import SwissEph from "swisseph-wasm";
 import path from "path";
@@ -13,16 +11,16 @@ import path from "path";
 export const config = { runtime: "nodejs" };
 
 const BODIES = [
-  { id: "SE_SUN",     name: "Sonne"   },
-  { id: "SE_MERCURY", name: "Merkur"  },
-  { id: "SE_VENUS",   name: "Venus"   },
-  { id: "SE_MARS",    name: "Mars"    },
-  { id: "SE_JUPITER", name: "Jupiter" },
-  { id: "SE_SATURN",  name: "Saturn"  },
-  { id: "SE_CHIRON",  name: "Chiron"  },
-  { id: "SE_URANUS",  name: "Uranus"  },
-  { id: "SE_NEPTUNE", name: "Neptun"  },
-  { id: "SE_PLUTO",   name: "Pluto"   }
+  { id: "SE_SUN",     name: "Sonne",   mode: "SUN"   },
+  { id: "SE_MERCURY", name: "Merkur",  mode: "RETRO" },
+  { id: "SE_VENUS",   name: "Venus",   mode: "RETRO" },
+  { id: "SE_MARS",    name: "Mars",    mode: "RETRO" },
+  { id: "SE_JUPITER", name: "Jupiter", mode: "RETRO" },
+  { id: "SE_SATURN",  name: "Saturn",  mode: "RETRO" },
+  { id: "SE_CHIRON",  name: "Chiron",  mode: "RETRO" },
+  { id: "SE_URANUS",  name: "Uranus",  mode: "RETRO" },
+  { id: "SE_NEPTUNE", name: "Neptun",  mode: "RETRO" },
+  { id: "SE_PLUTO",   name: "Pluto",   mode: "RETRO" }
 ];
 
 // ---------------- CORS ----------------
@@ -65,89 +63,136 @@ function formatDateDE({ year, month, day }) {
   return `${dd}.${mm}.${year}`;
 }
 
+// ---------------- Golden section minimum ----------------
+function goldenMin(f, a, b, tolDays) {
+  const gr = (Math.sqrt(5) - 1) / 2;
+  let c = b - gr * (b - a);
+  let d = a + gr * (b - a);
+  let fc = f(c);
+  let fd = f(d);
+
+  for (let it = 0; it < 80; it++) {
+    if ((b - a) <= tolDays) break;
+    if (fd < fc) {
+      a = c; c = d; fc = fd;
+      d = a + gr * (b - a);
+      fd = f(d);
+    } else {
+      b = d; d = c; fd = fc;
+      c = b - gr * (b - a);
+      fc = f(c);
+    }
+  }
+  return (a + b) / 2;
+}
+
+function minDistanceInWindow(getDist, a, b) {
+  const coarseStep = 0.25; // 6h
+  let bestJd = a;
+  let bestD = getDist(a);
+
+  for (let jd = a; jd <= b + 1e-9; jd += coarseStep) {
+    const j = Math.min(jd, b);
+    const d = getDist(j);
+    if (Number.isFinite(d) && (!Number.isFinite(bestD) || d < bestD)) {
+      bestD = d;
+      bestJd = j;
+    }
+  }
+
+  const left  = Math.max(a, bestJd - 2.0);
+  const right = Math.min(b, bestJd + 2.0);
+  const tol = 1 / 1440; // 1 Minute
+  return goldenMin(getDist, left, right, tol);
+}
+
 // ---------------- SwissEph access ----------------
+// WICHTIG: Bei fehlenden Ephemeriden (z.B. Chiron ohne seas_15.se1) liefert SwissEph
+// entweder Fehler oder NaN. Das fangen wir ab, damit nicht "0 Termine" entsteht, sondern
+// eine klare Info.
 function makeCalc(swe, bodyId) {
-  // SPEED nicht nötig, wir nutzen nur Distanz
-  const flags = swe.SEFLG_SWIEPH;
+  const flagsDist  = swe.SEFLG_SWIEPH;                 // Distanz reicht ohne SPEED
+  const flagsSpeed = swe.SEFLG_SWIEPH | swe.SEFLG_SPEED;
 
   return {
     getDist(jd) {
-      const pos = swe.calc_ut(jd, bodyId, flags);
-      return pos[2]; // Distanz (AU)
+      try {
+        const pos = swe.calc_ut(jd, bodyId, flagsDist);
+        const r = pos?.[2];
+        return Number.isFinite(r) ? r : NaN;
+      } catch (_) {
+        return NaN;
+      }
+    },
+    getLonSpeed(jd) {
+      try {
+        const pos = swe.calc_ut(jd, bodyId, flagsSpeed);
+        const sp = pos?.[3];
+        return Number.isFinite(sp) ? sp : NaN;
+      } catch (_) {
+        return NaN;
+      }
     }
   };
 }
 
-// ---------------- Root find via bisection on dr/dt ----------------
-function bisectZero(f, a, b, tolDays = 1 / 1440) { // 1 Minute
-  let fa = f(a);
-  let fb = f(b);
+// Retro-Fenster (Hysterese)
+function findRetroWindows(getLonSpeed, jdStart, jdEnd) {
+  const step = 0.125; // 3h
+  const need = 3;     // 9h Stabilität
+  const epsSpeed = 1e-6;
 
-  if (!Number.isFinite(fa) || !Number.isFinite(fb)) return null;
-  if (fa === 0) return a;
-  if (fb === 0) return b;
-  if (fa * fb > 0) return null;
+  const windows = [];
+  let inRetro = false;
+  let startJd = null;
+  let retroStreak = 0;
+  let directStreak = 0;
 
-  let left = a, right = b;
-  for (let it = 0; it < 80; it++) {
-    const mid = (left + right) / 2;
-    const fm = f(mid);
-    if (!Number.isFinite(fm)) return null;
-
-    if ((right - left) <= tolDays) return mid;
-
-    if (fa * fm <= 0) {
-      right = mid;
-      fb = fm;
-    } else {
-      left = mid;
-      fa = fm;
-    }
-  }
-  return (left + right) / 2;
-}
-
-// ---------------- Find perigees ----------------
-// Perigäum: dr/dt wechselt NEG -> POS
-function findPerigeesNumerical(getDist, jdStart, jdEnd) {
-  // Sampling (12h) reicht für Perigäen, robust und nicht „zitterig“
-  const step = 0.5;
-
-  // Ableitungsschritt h (in Tagen): 0.02 d ~ 28.8 Minuten
-  // -> stabil, aber fein genug, um Nullstelle sauber zu finden
-  const h = 0.02;
-
-  // Numerische Ableitung dr/dt
-  const drdt = (jd) => (getDist(jd + h) - getDist(jd - h)) / (2 * h);
-
-  const hits = [];
-
-  let prevJd = jdStart;
-  let prevV = drdt(prevJd);
-
-  for (let jd = jdStart + step; jd <= jdEnd + 1e-9; jd += step) {
+  for (let jd = jdStart; jd <= jdEnd + 1e-9; jd += step) {
     const curJd = Math.min(jd, jdEnd);
-    const curV = drdt(curJd);
+    const sp = getLonSpeed(curJd);
 
-    if (!Number.isFinite(prevV) || !Number.isFinite(curV)) {
-      prevJd = curJd;
-      prevV = curV;
+    // wenn Speed nicht berechenbar ist -> keine Retro-Fenster möglich
+    if (!Number.isFinite(sp)) {
+      if (curJd >= jdEnd) break;
       continue;
     }
 
-    // NEG -> POS
-    if (prevV < 0 && curV > 0) {
-      const root = bisectZero(drdt, prevJd, curJd);
-      if (root != null) hits.push(root);
+    if (Math.abs(sp) <= epsSpeed) {
+      if (curJd >= jdEnd) break;
+      continue;
     }
 
-    prevJd = curJd;
-    prevV = curV;
+    const isRetro = sp < 0;
+
+    if (isRetro) {
+      retroStreak++;
+      directStreak = 0;
+    } else {
+      directStreak++;
+      retroStreak = 0;
+    }
+
+    if (!inRetro && retroStreak >= need) {
+      inRetro = true;
+      startJd = curJd - step * (need + 1);
+      if (startJd < jdStart) startJd = jdStart;
+    }
+
+    if (inRetro && directStreak >= need) {
+      inRetro = false;
+      windows.push([startJd, curJd]);
+      startJd = null;
+    }
 
     if (curJd >= jdEnd) break;
   }
 
-  return hits;
+  if (inRetro && startJd != null) {
+    windows.push([startJd, jdEnd]);
+  }
+
+  return windows.filter(([a, b]) => (b - a) > 1.0);
 }
 
 export default async function handler(req, res) {
@@ -168,17 +213,22 @@ export default async function handler(req, res) {
       });
     }
 
+    // 1) WASM initialisieren
     await swe.initSwissEph();
 
     if (typeof swe.calc_ut !== "function") {
       return res.status(500).json({
         ok: false,
-        error: "SwissEph init fehlgeschlagen (calc_ut nicht verfügbar). Prüfe Vercel Runtime (Node, nicht Edge)."
+        error:
+          "SwissEph init fehlgeschlagen (calc_ut nicht verfügbar). Prüfe Vercel Runtime (Node, nicht Edge)."
       });
     }
 
-    // Ephemeridenpfad: deine Files liegen in api/ephe
+    // 2) Ephemeridenpfad setzen – DEIN Ordner liegt unter api/ephe
+    // (Das ist korrekt für dein Repo-Layout.)
     const ephePath = path.join(process.cwd(), "api", "ephe");
+
+    // Wichtig: nicht awaiten (swisseph-wasm ist hier synchron)
     if (typeof swe.set_ephe_path === "function") {
       swe.set_ephe_path(ephePath);
     } else if (typeof swe.swe_set_ephe_path === "function") {
@@ -190,11 +240,12 @@ export default async function handler(req, res) {
       });
     }
 
+    // Exakt das Kalenderjahr (UTC)
     const jdYearStart = swe.julday(year, 1, 1, 0.0, swe.SE_GREG_CAL);
     const jdYearEnd   = swe.julday(year + 1, 1, 1, 0.0, swe.SE_GREG_CAL);
 
-    // kleines Padding für Events knapp an der Grenze
-    const pad = 10;
+    // Puffer für Retro-Fenster über Jahreswechsel
+    const pad = 20;
     const jdCalcStart = jdYearStart - pad;
     const jdCalcEnd   = jdYearEnd + pad;
 
@@ -203,38 +254,66 @@ export default async function handler(req, res) {
 
     for (const body of BODIES) {
       const bodyId = swe[body.id];
+      const { getDist, getLonSpeed } = makeCalc(swe, bodyId);
 
-      if (!Number.isFinite(bodyId)) {
+      // HARTE PLAUSI-PRÜFUNG: kann SwissEph diesen Körper überhaupt rechnen?
+      // (Bei Chiron fehlt sonst fast immer seas_15.se1 im ephe-Ordner.)
+      const testDist = getDist(jdYearStart);
+      const testSpd  = (body.mode === "RETRO") ? getLonSpeed(jdYearStart) : 0;
+
+      if (!Number.isFinite(testDist) || (body.mode === "RETRO" && !Number.isFinite(testSpd))) {
         results.push({
           body: body.name,
           perigees: [],
-          info: `Body-ID ${body.id} nicht verfügbar`
+          info:
+            body.id === "SE_CHIRON"
+              ? "Chiron nicht berechenbar: sehr wahrscheinlich fehlt die Ephemeriden-Datei seas_15.se1 im Ordner api/ephe."
+              : "Planet/Körper nicht berechenbar: Ephemeriden-Dateien fehlen oder ephePath stimmt nicht."
         });
         continue;
       }
 
-      const { getDist } = makeCalc(swe, bodyId);
+      let perigees = [];
 
-      // astronomische Perigäen = lokale Minima der Distanz
-      const roots = findPerigeesNumerical(getDist, jdCalcStart, jdCalcEnd);
+      if (body.mode === "SUN") {
+        // Sonne: Perihel (Minimum Distanz) im Kalenderjahr
+        const jdMin = minDistanceInWindow(getDist, jdYearStart, jdYearEnd);
+        if (Number.isFinite(jdMin)) {
+          perigees = [{ datum: formatDateDE(jdToCalendar(jdMin)) }];
+        }
+      } else {
+        // Pro rückläufiger Phase genau 1 Distanzminimum
+        const windows = findRetroWindows(getLonSpeed, jdCalcStart, jdCalcEnd);
 
-      let perigees = roots
-        .filter((jd) => jd >= jdYearStart && jd < jdYearEnd)
-        .map((jd) => ({ datum: formatDateDE(jdToCalendar(jd)) }));
+        for (const [a0, b0] of windows) {
+          const jdMin = minDistanceInWindow(getDist, a0, b0);
+          if (Number.isFinite(jdMin) && jdMin >= jdYearStart && jdMin < jdYearEnd) {
+            perigees.push({ datum: formatDateDE(jdToCalendar(jdMin)) });
+          }
+        }
 
-      // Duplikate entfernen (wenn zwei Roots auf gleichen Tag runden)
-      const seen = new Set();
-      perigees = perigees.filter((p) => {
-        if (seen.has(p.datum)) return false;
-        seen.add(p.datum);
-        return true;
-      });
+        // Duplikate (durch Rundung auf Tag) entfernen
+        const seen = new Set();
+        perigees = perigees.filter((p) => {
+          if (seen.has(p.datum)) return false;
+          seen.add(p.datum);
+          return true;
+        });
+      }
 
       if (perigees.length === 0) {
-        results.push({ body: body.name, perigees: [], info: "Kein Perigäum in diesem Jahr" });
+        results.push({
+          body: body.name,
+          perigees: [],
+          info: "Kein Perigäum in diesem Jahr"
+        });
       } else {
         totalCount += perigees.length;
-        results.push({ body: body.name, perigees, info: null });
+        results.push({
+          body: body.name,
+          perigees,
+          info: null
+        });
       }
     }
 
