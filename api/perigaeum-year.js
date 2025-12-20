@@ -195,12 +195,14 @@ export default async function handler(req, res) {
       });
     }
 
-    await swe.initSwissEph();
+    // >>> WICHTIG: Ephemeriden-Pfad setzen VOR initSwissEph() <<<
+    // Du hast die Dateien im Repo unter: api/ephe/
+    // process.cwd() ist bei Vercel/Serverless das Deploy-Root
+    const ephePath = path.join(process.cwd(), "api", "ephe");
+    swe.set_ephe_path(ephePath);
 
-    // >>> WICHTIG: Ephemeriden-Pfad setzen (Repo-root /ephe) <<<
-    // Vercel/Serverless: process.cwd() zeigt auf Deploy-Root
-    const ephePath = path.join(process.cwd(), "ephe");
-    await swe.set_ephe_path(ephePath);
+    // Danach initialisieren
+    await swe.initSwissEph();
 
     // Exakt das Kalenderjahr (UTC)
     const jdYearStart = swe.julday(year, 1, 1, 0.0, swe.SE_GREG_CAL);
