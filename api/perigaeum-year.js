@@ -1,10 +1,10 @@
 // api/perigaeum-year.js
 // Jahres-Perigäum-Rechner (Datum, deutsch, UTC)
 //
-// Astronomisch sauber:
+// Astronomisch korrekt:
 // Perigäum = lokales Minimum der geozentrischen Distanz r(t)
 // <=> dr/dt wechselt von NEGATIV zu POSITIV
-// Swiss Ephemeris liefert dr/dt als pos[5] bei SEFLG_SPEED.
+// dr/dt wird hier numerisch aus r(t) berechnet (robust, unabhängig von pos[5]).
 
 import SwissEph from "swisseph-wasm";
 import path from "path";
@@ -67,25 +67,18 @@ function formatDateDE({ year, month, day }) {
 
 // ---------------- SwissEph access ----------------
 function makeCalc(swe, bodyId) {
-  const flags = swe.SEFLG_SWIEPH | swe.SEFLG_SPEED;
+  // SPEED nicht nötig, wir nutzen nur Distanz
+  const flags = swe.SEFLG_SWIEPH;
 
   return {
-    // geozentrische Distanz (AU)
     getDist(jd) {
       const pos = swe.calc_ut(jd, bodyId, flags);
-      return pos[2];
-    },
-    // Distanz-Geschwindigkeit dr/dt (AU/Tag)
-    getDistSpeed(jd) {
-      const pos = swe.calc_ut(jd, bodyId, flags);
-      return pos[5];
+      return pos[2]; // Distanz (AU)
     }
   };
 }
 
-// ---------------- Root find: dr/dt = 0 ----------------
-// Bisection in [a,b] mit Vorzeichenwechsel.
-// Voraussetzung: f(a) und f(b) haben entgegengesetztes Vorzeichen.
+// ---------------- Root find via bisection on dr/dt ----------------
 function bisectZero(f, a, b, tolDays = 1 / 1440) { // 1 Minute
   let fa = f(a);
   let fb = f(b);
@@ -114,20 +107,27 @@ function bisectZero(f, a, b, tolDays = 1 / 1440) { // 1 Minute
   return (left + right) / 2;
 }
 
-// ---------------- Find perigees in a year ----------------
+// ---------------- Find perigees ----------------
 // Perigäum: dr/dt wechselt NEG -> POS
-function findPerigeesByRadialSpeed(getDistSpeed, jdStart, jdEnd) {
-  const step = 0.5; // 12h Sampling: robust + nicht zu fein
-  const eps = 1e-10; // Station-Nähe
+function findPerigeesNumerical(getDist, jdStart, jdEnd) {
+  // Sampling (12h) reicht für Perigäen, robust und nicht „zitterig“
+  const step = 0.5;
+
+  // Ableitungsschritt h (in Tagen): 0.02 d ~ 28.8 Minuten
+  // -> stabil, aber fein genug, um Nullstelle sauber zu finden
+  const h = 0.02;
+
+  // Numerische Ableitung dr/dt
+  const drdt = (jd) => (getDist(jd + h) - getDist(jd - h)) / (2 * h);
 
   const hits = [];
 
   let prevJd = jdStart;
-  let prevV = getDistSpeed(prevJd);
+  let prevV = drdt(prevJd);
 
   for (let jd = jdStart + step; jd <= jdEnd + 1e-9; jd += step) {
     const curJd = Math.min(jd, jdEnd);
-    const curV = getDistSpeed(curJd);
+    const curV = drdt(curJd);
 
     if (!Number.isFinite(prevV) || !Number.isFinite(curV)) {
       prevJd = curJd;
@@ -135,13 +135,9 @@ function findPerigeesByRadialSpeed(getDistSpeed, jdStart, jdEnd) {
       continue;
     }
 
-    // kleine Werte als 0 behandeln (Station)
-    const a = (Math.abs(prevV) <= eps) ? 0 : prevV;
-    const b = (Math.abs(curV)  <= eps) ? 0 : curV;
-
-    // Neg -> Pos (oder Neg -> 0 -> Pos) innerhalb des Intervalls
-    if (a < 0 && b > 0) {
-      const root = bisectZero(getDistSpeed, prevJd, curJd);
+    // NEG -> POS
+    if (prevV < 0 && curV > 0) {
+      const root = bisectZero(drdt, prevJd, curJd);
       if (root != null) hits.push(root);
     }
 
@@ -172,10 +168,8 @@ export default async function handler(req, res) {
       });
     }
 
-    // 1) WASM initialisieren
     await swe.initSwissEph();
 
-    // Sicherheitscheck
     if (typeof swe.calc_ut !== "function") {
       return res.status(500).json({
         ok: false,
@@ -183,7 +177,7 @@ export default async function handler(req, res) {
       });
     }
 
-    // 2) Ephemeridenpfad setzen – Ordner liegt unter api/ephe
+    // Ephemeridenpfad: deine Files liegen in api/ephe
     const ephePath = path.join(process.cwd(), "api", "ephe");
     if (typeof swe.set_ephe_path === "function") {
       swe.set_ephe_path(ephePath);
@@ -196,11 +190,10 @@ export default async function handler(req, res) {
       });
     }
 
-    // Kalenderjahr (UTC)
     const jdYearStart = swe.julday(year, 1, 1, 0.0, swe.SE_GREG_CAL);
     const jdYearEnd   = swe.julday(year + 1, 1, 1, 0.0, swe.SE_GREG_CAL);
 
-    // Für sichere Nullstellen über Jahresgrenze (falls Event knapp am Rand liegt)
+    // kleines Padding für Events knapp an der Grenze
     const pad = 10;
     const jdCalcStart = jdYearStart - pad;
     const jdCalcEnd   = jdYearEnd + pad;
@@ -220,17 +213,16 @@ export default async function handler(req, res) {
         continue;
       }
 
-      const { getDistSpeed } = makeCalc(swe, bodyId);
+      const { getDist } = makeCalc(swe, bodyId);
 
-      // alle astronomischen Perigäen (lokale Distanz-Minima) über dr/dt Nullstelle
-      const roots = findPerigeesByRadialSpeed(getDistSpeed, jdCalcStart, jdCalcEnd);
+      // astronomische Perigäen = lokale Minima der Distanz
+      const roots = findPerigeesNumerical(getDist, jdCalcStart, jdCalcEnd);
 
-      // nur die im Kalenderjahr
       let perigees = roots
         .filter((jd) => jd >= jdYearStart && jd < jdYearEnd)
         .map((jd) => ({ datum: formatDateDE(jdToCalendar(jd)) }));
 
-      // Duplikate entfernen (falls zwei Roots auf denselben Tag runden)
+      // Duplikate entfernen (wenn zwei Roots auf gleichen Tag runden)
       const seen = new Set();
       perigees = perigees.filter((p) => {
         if (seen.has(p.datum)) return false;
@@ -239,18 +231,10 @@ export default async function handler(req, res) {
       });
 
       if (perigees.length === 0) {
-        results.push({
-          body: body.name,
-          perigees: [],
-          info: "Kein Perigäum in diesem Jahr"
-        });
+        results.push({ body: body.name, perigees: [], info: "Kein Perigäum in diesem Jahr" });
       } else {
         totalCount += perigees.length;
-        results.push({
-          body: body.name,
-          perigees,
-          info: null
-        });
+        results.push({ body: body.name, perigees, info: null });
       }
     }
 
