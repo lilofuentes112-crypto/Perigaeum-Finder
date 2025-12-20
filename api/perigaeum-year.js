@@ -1,8 +1,8 @@
 // api/perigaeum-year.js
 // Jahres-Perigäum-Rechner (Datum, deutsch, UTC)
 // - Sonne: Erd-Perihel = Minimum der Sonnen-Distanz im Kalenderjahr
-// - Merkur–Pluto + Chiron: pro rückläufiger Phase genau 1 Perigäum (Distanzminimum)
-// Retro-Erkennung über SwissEphemeris SPEED (robust, kein Station-Flattern per dLon)
+// - Merkur–Pluto + Chiron: Perigäen = lokale Minima der geozentrischen Distanz im Kalenderjahr
+// (ohne Retro-Filter, weil Perigäum eine Distanz-Eigenschaft ist und Retro-Filter bei Chiron/Jupiter oft "0 Treffer" ergibt)
 
 import SwissEph from "swisseph-wasm";
 import path from "path";
@@ -12,15 +12,15 @@ export const config = { runtime: "nodejs" };
 
 const BODIES = [
   { id: "SE_SUN",     name: "Sonne",   mode: "SUN"   },
-  { id: "SE_MERCURY", name: "Merkur",  mode: "RETRO" },
-  { id: "SE_VENUS",   name: "Venus",   mode: "RETRO" },
-  { id: "SE_MARS",    name: "Mars",    mode: "RETRO" },
-  { id: "SE_JUPITER", name: "Jupiter", mode: "RETRO" },
-  { id: "SE_SATURN",  name: "Saturn",  mode: "RETRO" },
-  { id: "SE_CHIRON",  name: "Chiron",  mode: "RETRO" },
-  { id: "SE_URANUS",  name: "Uranus",  mode: "RETRO" },
-  { id: "SE_NEPTUNE", name: "Neptun",  mode: "RETRO" },
-  { id: "SE_PLUTO",   name: "Pluto",   mode: "RETRO" }
+  { id: "SE_MERCURY", name: "Merkur",  mode: "MINIMA" },
+  { id: "SE_VENUS",   name: "Venus",   mode: "MINIMA" },
+  { id: "SE_MARS",    name: "Mars",    mode: "MINIMA" },
+  { id: "SE_JUPITER", name: "Jupiter", mode: "MINIMA" },
+  { id: "SE_SATURN",  name: "Saturn",  mode: "MINIMA" },
+  { id: "SE_CHIRON",  name: "Chiron",  mode: "MINIMA" },
+  { id: "SE_URANUS",  name: "Uranus",  mode: "MINIMA" },
+  { id: "SE_NEPTUNE", name: "Neptun",  mode: "MINIMA" },
+  { id: "SE_PLUTO",   name: "Pluto",   mode: "MINIMA" }
 ];
 
 // ---------------- CORS ----------------
@@ -107,81 +107,64 @@ function minDistanceInWindow(getDist, a, b) {
 }
 
 // ---------------- SwissEph access ----------------
-// WICHTIG:
-// - Für Chiron müssen wir HELIOZENTRISCH rechnen, sonst gibt es oft "kein Perigäum" im Retrofenster,
-//   weil geozentrische Distanz/Retro nicht sauber zusammenpassen.
-// - Für alle anderen bleibt es wie bisher (geozentrisch).
 function makeCalc(swe, bodyId) {
-  const baseFlags = swe.SEFLG_SWIEPH | swe.SEFLG_SPEED;
-
-  // Chiron speziell: heliozentrisch
-  const flags = (bodyId === swe.SE_CHIRON)
-    ? (baseFlags | swe.SEFLG_HELCTR)
-    : baseFlags;
+  // geozentrische Distanz zur Erde (AU)
+  const flags = swe.SEFLG_SWIEPH | swe.SEFLG_SPEED;
 
   return {
     getDist(jd) {
       const pos = swe.calc_ut(jd, bodyId, flags);
       return pos[2]; // Distanz (AU)
-    },
-    getLonSpeed(jd) {
-      const pos = swe.calc_ut(jd, bodyId, flags);
-      return pos[3]; // Längengeschwindigkeit (deg/day)
     }
   };
 }
 
-// Retro-Fenster (Hysterese)
-function findRetroWindows(getLonSpeed, jdStart, jdEnd) {
-  const step = 0.125; // 3h
-  const need = 3;     // 9h Stabilität
-  const epsSpeed = 1e-6;
+// ----------- lokale Minima der Distanz finden -----------
+function findLocalMinimaJds(getDist, jdStart, jdEnd) {
+  // Schrittweite: 12h ist für alle Körper stabil genug und findet die Minima sicher,
+  // danach wird ohnehin in einem Fenster verfeinert.
+  const step = 0.5; // Tage (=12h)
 
-  const windows = [];
-  let inRetro = false;
-  let startJd = null;
-  let retroStreak = 0;
-  let directStreak = 0;
+  const candidates = [];
+  let prevJd = jdStart;
+  let prevD = getDist(prevJd);
 
-  for (let jd = jdStart; jd <= jdEnd + 1e-9; jd += step) {
-    const curJd = Math.min(jd, jdEnd);
-    const sp = getLonSpeed(curJd);
+  let curJd = Math.min(prevJd + step, jdEnd);
+  let curD = getDist(curJd);
 
-    if (Math.abs(sp) <= epsSpeed) {
-      if (curJd >= jdEnd) break;
-      continue;
+  for (let jd = curJd + step; jd <= jdEnd + 1e-9; jd += step) {
+    const nextJd = Math.min(jd, jdEnd);
+    const nextD = getDist(nextJd);
+
+    // lokales Minimum: fällt und steigt wieder
+    if (curD <= prevD && curD <= nextD) {
+      // Kandidat um curJd herum verfeinern
+      const a = Math.max(jdStart, curJd - 3.0);
+      const b = Math.min(jdEnd,   curJd + 3.0);
+      const jdMin = minDistanceInWindow(getDist, a, b);
+      candidates.push(jdMin);
     }
 
-    const isRetro = sp < 0;
+    prevJd = curJd; prevD = curD;
+    curJd = nextJd; curD = nextD;
 
-    if (isRetro) {
-      retroStreak++;
-      directStreak = 0;
+    if (nextJd >= jdEnd) break;
+  }
+
+  // Duplikate zusammenziehen (wenn mehrere Kandidaten dasselbe Minimum erwischen)
+  candidates.sort((a, b) => a - b);
+  const merged = [];
+  for (const jd of candidates) {
+    if (merged.length === 0) {
+      merged.push(jd);
     } else {
-      directStreak++;
-      retroStreak = 0;
+      const last = merged[merged.length - 1];
+      if (Math.abs(jd - last) > 2.0) {
+        merged.push(jd);
+      }
     }
-
-    if (!inRetro && retroStreak >= need) {
-      inRetro = true;
-      startJd = curJd - step * (need + 1);
-      if (startJd < jdStart) startJd = jdStart;
-    }
-
-    if (inRetro && directStreak >= need) {
-      inRetro = false;
-      windows.push([startJd, curJd]);
-      startJd = null;
-    }
-
-    if (curJd >= jdEnd) break;
   }
-
-  if (inRetro && startJd != null) {
-    windows.push([startJd, jdEnd]);
-  }
-
-  return windows.filter(([a, b]) => (b - a) > 1.0);
+  return merged;
 }
 
 export default async function handler(req, res) {
@@ -205,7 +188,6 @@ export default async function handler(req, res) {
     // 1) WASM initialisieren
     await swe.initSwissEph();
 
-    // Sicherheitscheck: wenn das fehlschlägt, kommt genau der ccall-Fehler später
     if (typeof swe.calc_ut !== "function") {
       return res.status(500).json({
         ok: false,
@@ -213,10 +195,8 @@ export default async function handler(req, res) {
       });
     }
 
-    // 2) Ephemeridenpfad setzen – DEIN Ordner liegt unter api/ephe
+    // 2) Ephemeridenpfad setzen – Ordner liegt unter api/ephe
     const ephePath = path.join(process.cwd(), "api", "ephe");
-
-    // Wichtig: NICHT awaiten. Und: je nach Build heißt es set_ephe_path oder swe_set_ephe_path.
     if (typeof swe.set_ephe_path === "function") {
       swe.set_ephe_path(ephePath);
     } else if (typeof swe.swe_set_ephe_path === "function") {
@@ -232,33 +212,30 @@ export default async function handler(req, res) {
     const jdYearStart = swe.julday(year, 1, 1, 0.0, swe.SE_GREG_CAL);
     const jdYearEnd   = swe.julday(year + 1, 1, 1, 0.0, swe.SE_GREG_CAL);
 
-    // Puffer für Retro-Fenster über Jahreswechsel
-    const pad = 20;
-    const jdCalcStart = jdYearStart - pad;
-    const jdCalcEnd   = jdYearEnd + pad;
-
     const results = [];
     let totalCount = 0;
 
     for (const body of BODIES) {
       const bodyId = swe[body.id];
-      const { getDist, getLonSpeed } = makeCalc(swe, bodyId);
+      const { getDist } = makeCalc(swe, bodyId);
 
       let perigees = [];
 
       if (body.mode === "SUN") {
+        // Sonne: Perihel (Minimum Distanz) im Kalenderjahr
         const jdMin = minDistanceInWindow(getDist, jdYearStart, jdYearEnd);
         perigees = [{ datum: formatDateDE(jdToCalendar(jdMin)) }];
       } else {
-        const windows = findRetroWindows(getLonSpeed, jdCalcStart, jdCalcEnd);
+        // Alle anderen: lokale Minima der Distanz im Jahr
+        const minimaJds = findLocalMinimaJds(getDist, jdYearStart, jdYearEnd);
 
-        for (const [a0, b0] of windows) {
-          const jdMin = minDistanceInWindow(getDist, a0, b0);
+        for (const jdMin of minimaJds) {
           if (jdMin >= jdYearStart && jdMin < jdYearEnd) {
             perigees.push({ datum: formatDateDE(jdToCalendar(jdMin)) });
           }
         }
 
+        // Duplikate (durch Rundung auf Tag) entfernen
         const seen = new Set();
         perigees = perigees.filter((p) => {
           if (seen.has(p.datum)) return false;
@@ -268,10 +245,18 @@ export default async function handler(req, res) {
       }
 
       if (perigees.length === 0) {
-        results.push({ body: body.name, perigees: [], info: "Kein Perigäum in diesem Jahr" });
+        results.push({
+          body: body.name,
+          perigees: [],
+          info: "Kein Perigäum in diesem Jahr"
+        });
       } else {
         totalCount += perigees.length;
-        results.push({ body: body.name, perigees, info: null });
+        results.push({
+          body: body.name,
+          perigees,
+          info: null
+        });
       }
     }
 
@@ -286,8 +271,6 @@ export default async function handler(req, res) {
     console.error("Perigäum-Fehler:", e);
     return res.status(500).json({ ok: false, error: String(e) });
   } finally {
-    // close() ist optional; falls es intern wieder ccall braucht und irgendwas schief war:
     try { if (typeof swe.close === "function") swe.close(); } catch (_) {}
   }
 }
-
