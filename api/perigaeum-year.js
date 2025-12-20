@@ -1,13 +1,12 @@
 // api/perigaeum-year.js
 // Jahres-Perigäum-Rechner (Datum, deutsch, UTC)
 //
-// Definitionen (wichtig, für Seriosität):
-// - Sonne: Jahresminimum der Erd-Sonnen-Distanz (geozentrisch = heliozentrische Erdbahndistanz)
-// - Merkur–Pluto: pro rückläufiger Phase genau 1 geozentrisches Distanzminimum (innerhalb der Retro-Phase)
-// - Chiron: NICHT "pro Rückläufigkeit" (astronomisch nicht haltbar) → stattdessen:
-//           Jahresminimum der geozentrischen Distanz im Kalenderjahr (UTC)
+// - Sonne: Erd-Perihel = Minimum der Sonnen-Distanz im Kalenderjahr
+// - Merkur–Pluto: pro rückläufiger Phase genau 1 Perigäum (Distanzminimum)
+// - Chiron: wie oben, ABER nur wenn die Ephemeriden seriös verfügbar sind
+//   (sonst: klare Meldung statt Fake-Datum)
 //
-// Retro-Erkennung: über SwissEphemeris SPEED (robust, kein Station-Flattern per dLon)
+// Retro-Erkennung über SwissEphemeris SPEED (robust, kein Station-Flattern per dLon)
 
 import SwissEph from "swisseph-wasm";
 import path from "path";
@@ -16,17 +15,16 @@ import path from "path";
 export const config = { runtime: "nodejs" };
 
 const BODIES = [
-  { id: "SE_SUN",     name: "Sonne",                         mode: "SUN"     },
-  { id: "SE_MERCURY", name: "Merkur",                        mode: "RETRO"   },
-  { id: "SE_VENUS",   name: "Venus",                         mode: "RETRO"   },
-  { id: "SE_MARS",    name: "Mars",                          mode: "RETRO"   },
-  { id: "SE_JUPITER", name: "Jupiter",                       mode: "RETRO"   },
-  { id: "SE_SATURN",  name: "Saturn",                        mode: "RETRO"   },
-  // Wichtig: Chiron NICHT wie Planet behandeln
-  { id: "SE_CHIRON",  name: "Chiron (Jahresminimum Distanz)", mode: "YEARMIN" },
-  { id: "SE_URANUS",  name: "Uranus",                        mode: "RETRO"   },
-  { id: "SE_NEPTUNE", name: "Neptun",                        mode: "RETRO"   },
-  { id: "SE_PLUTO",   name: "Pluto",                         mode: "RETRO"   }
+  { id: "SE_SUN",     name: "Sonne",   mode: "SUN"   },
+  { id: "SE_MERCURY", name: "Merkur",  mode: "RETRO" },
+  { id: "SE_VENUS",   name: "Venus",   mode: "RETRO" },
+  { id: "SE_MARS",    name: "Mars",    mode: "RETRO" },
+  { id: "SE_JUPITER", name: "Jupiter", mode: "RETRO" },
+  { id: "SE_SATURN",  name: "Saturn",  mode: "RETRO" },
+  { id: "SE_CHIRON",  name: "Chiron",  mode: "RETRO" },
+  { id: "SE_URANUS",  name: "Uranus",  mode: "RETRO" },
+  { id: "SE_NEPTUNE", name: "Neptun",  mode: "RETRO" },
+  { id: "SE_PLUTO",   name: "Pluto",   mode: "RETRO" }
 ];
 
 // ---------------- CORS ----------------
@@ -97,9 +95,14 @@ function minDistanceInWindow(getDist, a, b) {
   let bestJd = a;
   let bestD = getDist(a);
 
+  if (!Number.isFinite(bestD)) {
+    throw new Error("Distanz ist nicht berechenbar (NaN/Infinity). Ephemeriden fehlen oder werden nicht gelesen.");
+  }
+
   for (let jd = a; jd <= b + 1e-9; jd += coarseStep) {
     const j = Math.min(jd, b);
     const d = getDist(j);
+    if (!Number.isFinite(d)) continue;
     if (d < bestD) {
       bestD = d;
       bestJd = j;
@@ -116,13 +119,22 @@ function minDistanceInWindow(getDist, a, b) {
 function makeCalc(swe, bodyId) {
   const flags = swe.SEFLG_SWIEPH | swe.SEFLG_SPEED;
 
+  function safeCalc(jd) {
+    const pos = swe.calc_ut(jd, bodyId, flags);
+    // Erwartet Array: [lon, lat, dist, speedLon, ...]
+    if (!Array.isArray(pos) || pos.length < 4) {
+      throw new Error("calc_ut lieferte kein gültiges Array. SwissEph-Init/Ephe-Dateien prüfen.");
+    }
+    return pos;
+  }
+
   return {
     getDist(jd) {
-      const pos = swe.calc_ut(jd, bodyId, flags);
-      return pos[2]; // Distanz (AU), geozentrisch
+      const pos = safeCalc(jd);
+      return pos[2]; // Distanz (AU)
     },
     getLonSpeed(jd) {
-      const pos = swe.calc_ut(jd, bodyId, flags);
+      const pos = safeCalc(jd);
       return pos[3]; // Längengeschwindigkeit (deg/day)
     }
   };
@@ -143,6 +155,12 @@ function findRetroWindows(getLonSpeed, jdStart, jdEnd) {
   for (let jd = jdStart; jd <= jdEnd + 1e-9; jd += step) {
     const curJd = Math.min(jd, jdEnd);
     const sp = getLonSpeed(curJd);
+
+    if (!Number.isFinite(sp)) {
+      // Wenn SPEED nicht sinnvoll ist, können wir Retrofenster nicht seriös bestimmen.
+      // Dann lieber "keine Fenster" liefern, statt irgendwas zu erfinden.
+      return [];
+    }
 
     if (Math.abs(sp) <= epsSpeed) {
       if (curJd >= jdEnd) break;
@@ -209,10 +227,9 @@ export default async function handler(req, res) {
       });
     }
 
-    // 2) Ephemeridenpfad setzen – deine Dateien liegen unter api/ephe
+    // 2) Ephemeridenpfad setzen – Ordner liegt unter api/ephe
     const ephePath = path.join(process.cwd(), "api", "ephe");
 
-    // NICHT awaiten (je nach Build ist es sync). Und: je nach Paketname set_ephe_path oder swe_set_ephe_path.
     if (typeof swe.set_ephe_path === "function") {
       swe.set_ephe_path(ephePath);
     } else if (typeof swe.swe_set_ephe_path === "function") {
@@ -238,24 +255,58 @@ export default async function handler(req, res) {
 
     for (const body of BODIES) {
       const bodyId = swe[body.id];
-      const { getDist, getLonSpeed } = makeCalc(swe, bodyId);
 
+      // Wenn bodyId undefined wäre, ist das ein Konfigurationsfehler.
+      if (typeof bodyId !== "number") {
+        results.push({
+          body: body.name,
+          perigees: [],
+          info: "Interner Fehler: Body-ID nicht gefunden."
+        });
+        continue;
+      }
+
+      const { getDist, getLonSpeed } = makeCalc(swe, bodyId);
       let perigees = [];
 
       if (body.mode === "SUN") {
-        // Sonne: Jahresminimum der Distanz im Kalenderjahr
         const jdMin = minDistanceInWindow(getDist, jdYearStart, jdYearEnd);
         perigees = [{ datum: formatDateDE(jdToCalendar(jdMin)) }];
-
-      } else if (body.mode === "YEARMIN") {
-        // Chiron: astronomisch seriös = Jahresminimum der geozentrischen Distanz
-        const jdMin = minDistanceInWindow(getDist, jdYearStart, jdYearEnd);
-        perigees = [{ datum: formatDateDE(jdToCalendar(jdMin)) }];
-
       } else {
-        // Merkur–Pluto: pro rückläufiger Phase genau 1 Distanzminimum
+        // Retrofenster finden
         const windows = findRetroWindows(getLonSpeed, jdCalcStart, jdCalcEnd);
 
+        // --- Chiron-Sanity-Check (damit nie Fake-"01.01." erscheint) ---
+        if (body.id === "SE_CHIRON") {
+          // Prüfe, ob Distanz im Jahresverlauf überhaupt variiert.
+          // Wenn nicht: Ephemeriden fehlen/werden nicht gelesen -> KEIN Ergebnis ausgeben.
+          const d1 = getDist(jdYearStart + 1);          // 02.01.
+          const d2 = getDist(jdYearStart + 180);        // ca. Juli
+          if (!Number.isFinite(d1) || !Number.isFinite(d2) || Math.abs(d2 - d1) < 1e-8) {
+            results.push({
+              body: body.name,
+              perigees: [],
+              info:
+                "Chiron kann nicht seriös berechnet werden (Distanz verändert sich nicht). " +
+                "Sehr wahrscheinlich fehlen die passenden seas_19/seas_20 Ephemeriden-Dateien im Ordner api/ephe."
+            });
+            continue;
+          }
+
+          // Wenn Retrofenster nicht bestimmbar: ebenfalls lieber nichts als Fake.
+          if (windows.length === 0) {
+            results.push({
+              body: body.name,
+              perigees: [],
+              info:
+                "Chiron: Retrofenster konnte nicht bestimmt werden (SPEED unplausibel/fehlend). " +
+                "Bitte Ephemeriden-Dateien prüfen."
+            });
+            continue;
+          }
+        }
+
+        // Normalfall: pro Retrofenster genau 1 Distanzminimum
         for (const [a0, b0] of windows) {
           const jdMin = minDistanceInWindow(getDist, a0, b0);
           if (jdMin >= jdYearStart && jdMin < jdYearEnd) {
@@ -276,7 +327,7 @@ export default async function handler(req, res) {
         results.push({
           body: body.name,
           perigees: [],
-          info: "Kein Termin in diesem Jahr"
+          info: "Kein Perigäum in diesem Jahr"
         });
       } else {
         totalCount += perigees.length;
