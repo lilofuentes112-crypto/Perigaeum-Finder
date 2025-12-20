@@ -9,6 +9,7 @@
 //   -> Sonst: "Kein Perigäum in diesem Jahr".
 // Außerdem: pro Körper eigener Try/Catch, damit ein Fehler bei Chiron nicht alles auf 0 setzt.
 
+const BUILD_ID = "2025-12-20-CHIRON-YEARMIN-1";
 import SwissEph from "swisseph-wasm";
 import path from "path";
 
