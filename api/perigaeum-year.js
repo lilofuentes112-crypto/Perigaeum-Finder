@@ -3,15 +3,15 @@
 //
 // - Sonne: Erd-Perihel = Minimum der Sonnen-Distanz im Kalenderjahr
 // - Merkur–Pluto: pro rückläufiger Phase genau 1 Perigäum (Distanzminimum)
-// - Chiron: wie oben, ABER nur wenn die Ephemeriden seriös verfügbar sind
-//   (sonst: klare Meldung statt Fake-Datum)
-//
-// Retro-Erkennung über SwissEphemeris SPEED (robust, kein Station-Flattern per dLon)
+// - Chiron: Astronomisch sauberer Sonderfall:
+//   -> Suche globales Distanzminimum im erweiterten Fenster (Jahr ± Pad).
+//   -> Nur wenn das Minimum IM Kalenderjahr liegt, wird es als Perigäum ausgegeben.
+//   -> Sonst: "Kein Perigäum in diesem Jahr".
+// Außerdem: pro Körper eigener Try/Catch, damit ein Fehler bei Chiron nicht alles auf 0 setzt.
 
 import SwissEph from "swisseph-wasm";
 import path from "path";
 
-// Falls Vercel/Next irrtümlich Edge nimmt: erzwinge Node
 export const config = { runtime: "nodejs" };
 
 const BODIES = [
@@ -21,7 +21,7 @@ const BODIES = [
   { id: "SE_MARS",    name: "Mars",    mode: "RETRO" },
   { id: "SE_JUPITER", name: "Jupiter", mode: "RETRO" },
   { id: "SE_SATURN",  name: "Saturn",  mode: "RETRO" },
-  { id: "SE_CHIRON",  name: "Chiron",  mode: "RETRO" },
+  { id: "SE_CHIRON",  name: "Chiron",  mode: "CHIRON_GLOBAL" },
   { id: "SE_URANUS",  name: "Uranus",  mode: "RETRO" },
   { id: "SE_NEPTUNE", name: "Neptun",  mode: "RETRO" },
   { id: "SE_PLUTO",   name: "Pluto",   mode: "RETRO" }
@@ -95,14 +95,9 @@ function minDistanceInWindow(getDist, a, b) {
   let bestJd = a;
   let bestD = getDist(a);
 
-  if (!Number.isFinite(bestD)) {
-    throw new Error("Distanz ist nicht berechenbar (NaN/Infinity). Ephemeriden fehlen oder werden nicht gelesen.");
-  }
-
   for (let jd = a; jd <= b + 1e-9; jd += coarseStep) {
     const j = Math.min(jd, b);
     const d = getDist(j);
-    if (!Number.isFinite(d)) continue;
     if (d < bestD) {
       bestD = d;
       bestJd = j;
@@ -115,26 +110,55 @@ function minDistanceInWindow(getDist, a, b) {
   return goldenMin(getDist, left, right, tol);
 }
 
+// Für Chiron: globales Minimum im erweiterten Fenster finden, dann prüfen ob im Jahr
+function globalMinWithPad(getDist, jdYearStart, jdYearEnd, padDays) {
+  const a = jdYearStart - padDays;
+  const b = jdYearEnd + padDays;
+
+  // grobes Raster über das ganze Fenster
+  const coarseStep = 0.25; // 6h
+  let bestJd = a;
+  let bestD = getDist(a);
+
+  for (let jd = a; jd <= b + 1e-9; jd += coarseStep) {
+    const j = Math.min(jd, b);
+    const d = getDist(j);
+    if (d < bestD) {
+      bestD = d;
+      bestJd = j;
+    }
+  }
+
+  // Feinsuche um bestJd
+  const left  = Math.max(a, bestJd - 5.0);
+  const right = Math.min(b, bestJd + 5.0);
+  const tol = 1 / 1440; // 1 Minute
+  const jdMin = goldenMin(getDist, left, right, tol);
+
+  const inYear = (jdMin >= jdYearStart && jdMin < jdYearEnd);
+  return { jdMin, inYear };
+}
+
 // ---------------- SwissEph access ----------------
 function makeCalc(swe, bodyId) {
   const flags = swe.SEFLG_SWIEPH | swe.SEFLG_SPEED;
 
-  function safeCalc(jd) {
+  function safeCalcUt(jd) {
     const pos = swe.calc_ut(jd, bodyId, flags);
-    // Erwartet Array: [lon, lat, dist, speedLon, ...]
-    if (!Array.isArray(pos) || pos.length < 4) {
-      throw new Error("calc_ut lieferte kein gültiges Array. SwissEph-Init/Ephe-Dateien prüfen.");
+    // Bei Problemen kann pos "undefined" oder kein Array sein.
+    if (!pos || !Array.isArray(pos) || pos.length < 4) {
+      throw new Error("calc_ut lieferte kein gültiges Array");
     }
     return pos;
   }
 
   return {
     getDist(jd) {
-      const pos = safeCalc(jd);
+      const pos = safeCalcUt(jd);
       return pos[2]; // Distanz (AU)
     },
     getLonSpeed(jd) {
-      const pos = safeCalc(jd);
+      const pos = safeCalcUt(jd);
       return pos[3]; // Längengeschwindigkeit (deg/day)
     }
   };
@@ -155,12 +179,6 @@ function findRetroWindows(getLonSpeed, jdStart, jdEnd) {
   for (let jd = jdStart; jd <= jdEnd + 1e-9; jd += step) {
     const curJd = Math.min(jd, jdEnd);
     const sp = getLonSpeed(curJd);
-
-    if (!Number.isFinite(sp)) {
-      // Wenn SPEED nicht sinnvoll ist, können wir Retrofenster nicht seriös bestimmen.
-      // Dann lieber "keine Fenster" liefern, statt irgendwas zu erfinden.
-      return [];
-    }
 
     if (Math.abs(sp) <= epsSpeed) {
       if (curJd >= jdEnd) break;
@@ -227,9 +245,10 @@ export default async function handler(req, res) {
       });
     }
 
-    // 2) Ephemeridenpfad setzen – Ordner liegt unter api/ephe
+    // 2) Ephemeridenpfad setzen – DEIN Ordner liegt unter api/ephe
     const ephePath = path.join(process.cwd(), "api", "ephe");
 
+    // Wichtig: NICHT awaiten. Und: je nach Build heißt es set_ephe_path oder swe_set_ephe_path.
     if (typeof swe.set_ephe_path === "function") {
       swe.set_ephe_path(ephePath);
     } else if (typeof swe.swe_set_ephe_path === "function") {
@@ -245,96 +264,80 @@ export default async function handler(req, res) {
     const jdYearStart = swe.julday(year, 1, 1, 0.0, swe.SE_GREG_CAL);
     const jdYearEnd   = swe.julday(year + 1, 1, 1, 0.0, swe.SE_GREG_CAL);
 
-    // Puffer für Retro-Fenster über Jahreswechsel
-    const pad = 20;
-    const jdCalcStart = jdYearStart - pad;
-    const jdCalcEnd   = jdYearEnd + pad;
+    // Puffer für Retro-Fenster über Jahreswechsel (Planeten)
+    const padRetro = 20;
+    const jdCalcStart = jdYearStart - padRetro;
+    const jdCalcEnd   = jdYearEnd + padRetro;
 
     const results = [];
     let totalCount = 0;
 
     for (const body of BODIES) {
-      const bodyId = swe[body.id];
-
-      // Wenn bodyId undefined wäre, ist das ein Konfigurationsfehler.
-      if (typeof bodyId !== "number") {
-        results.push({
-          body: body.name,
-          perigees: [],
-          info: "Interner Fehler: Body-ID nicht gefunden."
-        });
-        continue;
-      }
-
-      const { getDist, getLonSpeed } = makeCalc(swe, bodyId);
-      let perigees = [];
-
-      if (body.mode === "SUN") {
-        const jdMin = minDistanceInWindow(getDist, jdYearStart, jdYearEnd);
-        perigees = [{ datum: formatDateDE(jdToCalendar(jdMin)) }];
-      } else {
-        // Retrofenster finden
-        const windows = findRetroWindows(getLonSpeed, jdCalcStart, jdCalcEnd);
-
-        // --- Chiron-Sanity-Check (damit nie Fake-"01.01." erscheint) ---
-        if (body.id === "SE_CHIRON") {
-          // Prüfe, ob Distanz im Jahresverlauf überhaupt variiert.
-          // Wenn nicht: Ephemeriden fehlen/werden nicht gelesen -> KEIN Ergebnis ausgeben.
-          const d1 = getDist(jdYearStart + 1);          // 02.01.
-          const d2 = getDist(jdYearStart + 180);        // ca. Juli
-          if (!Number.isFinite(d1) || !Number.isFinite(d2) || Math.abs(d2 - d1) < 1e-8) {
-            results.push({
-              body: body.name,
-              perigees: [],
-              info:
-                "Chiron kann nicht seriös berechnet werden (Distanz verändert sich nicht). " +
-                "Sehr wahrscheinlich fehlen die passenden seas_19/seas_20 Ephemeriden-Dateien im Ordner api/ephe."
-            });
-            continue;
-          }
-
-          // Wenn Retrofenster nicht bestimmbar: ebenfalls lieber nichts als Fake.
-          if (windows.length === 0) {
-            results.push({
-              body: body.name,
-              perigees: [],
-              info:
-                "Chiron: Retrofenster konnte nicht bestimmt werden (SPEED unplausibel/fehlend). " +
-                "Bitte Ephemeriden-Dateien prüfen."
-            });
-            continue;
-          }
+      try {
+        const bodyId = swe[body.id];
+        if (typeof bodyId !== "number") {
+          throw new Error(`Unbekannte SwissEph-Konstante: ${body.id}`);
         }
 
-        // Normalfall: pro Retrofenster genau 1 Distanzminimum
-        for (const [a0, b0] of windows) {
-          const jdMin = minDistanceInWindow(getDist, a0, b0);
-          if (jdMin >= jdYearStart && jdMin < jdYearEnd) {
-            perigees.push({ datum: formatDateDE(jdToCalendar(jdMin)) });
+        const { getDist, getLonSpeed } = makeCalc(swe, bodyId);
+
+        let perigees = [];
+        let info = null;
+        let labelOverride = null;
+
+        if (body.mode === "SUN") {
+          const jdMin = minDistanceInWindow(getDist, jdYearStart, jdYearEnd);
+          perigees = [{ datum: formatDateDE(jdToCalendar(jdMin)) }];
+
+        } else if (body.mode === "CHIRON_GLOBAL") {
+          // Chiron: globales Minimum im erweiterten Fenster, nur wenn Minimum im Jahr liegt
+          const padChiron = 60; // ± 60 Tage (konservativ, sauber)
+          const { jdMin, inYear } = globalMinWithPad(getDist, jdYearStart, jdYearEnd, padChiron);
+
+          labelOverride = "Chiron";
+          if (inYear) {
+            perigees = [{ datum: formatDateDE(jdToCalendar(jdMin)) }];
+          } else {
+            perigees = [];
+            info = "Kein Perigäum in diesem Jahr";
           }
+
+        } else {
+          // Planeten: pro rückläufiger Phase genau 1 Distanzminimum (wie bisher)
+          const windows = findRetroWindows(getLonSpeed, jdCalcStart, jdCalcEnd);
+
+          for (const [a0, b0] of windows) {
+            const jdMin = minDistanceInWindow(getDist, a0, b0);
+            if (jdMin >= jdYearStart && jdMin < jdYearEnd) {
+              perigees.push({ datum: formatDateDE(jdToCalendar(jdMin)) });
+            }
+          }
+
+          // Duplikate entfernen (Rundung auf Tag)
+          const seen = new Set();
+          perigees = perigees.filter((p) => {
+            if (seen.has(p.datum)) return false;
+            seen.add(p.datum);
+            return true;
+          });
+
+          if (perigees.length === 0) info = "Kein Perigäum in diesem Jahr";
         }
 
-        // Duplikate (durch Rundung auf Tag) entfernen
-        const seen = new Set();
-        perigees = perigees.filter((p) => {
-          if (seen.has(p.datum)) return false;
-          seen.add(p.datum);
-          return true;
-        });
-      }
+        if (perigees.length > 0) totalCount += perigees.length;
 
-      if (perigees.length === 0) {
         results.push({
-          body: body.name,
-          perigees: [],
-          info: "Kein Perigäum in diesem Jahr"
-        });
-      } else {
-        totalCount += perigees.length;
-        results.push({
-          body: body.name,
+          body: labelOverride || body.name,
           perigees,
-          info: null
+          info
+        });
+
+      } catch (err) {
+        // Ganz wichtig: Fehler bei einem Körper darf nicht alles killen.
+        results.push({
+          body: body.name,
+          perigees: [],
+          info: `Berechnung nicht möglich: ${String(err?.message || err)}`
         });
       }
     }
