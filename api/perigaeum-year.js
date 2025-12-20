@@ -355,11 +355,13 @@ export default async function handler(req, res) {
     }
 
     return res.status(200).json({
-      ok: true,
-      year,
-      totalCount,
-      bodies: results
-    });
+  buildId: BUILD_ID,
+  ok: true,
+  year,
+  totalCount,
+  bodies: results
+});
+
 
   } catch (e) {
     console.error("Perigäum-Fehler:", e);
