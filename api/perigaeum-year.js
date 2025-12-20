@@ -2,16 +2,21 @@
 // Jahres-Perigäum-Rechner (Datum, deutsch, UTC)
 //
 // - Sonne: Erd-Perihel = Minimum der Sonnen-Distanz im Kalenderjahr
-// - Merkur–Pluto (und die restlichen Planeten hier): pro rückläufiger Phase genau 1 Perigäum (Distanzminimum)
-// - Chiron: Astronomisch sauberer Sonderfall:
-//   -> Suche globales Distanzminimum im erweiterten Fenster (Jahr ± Pad).
-//   -> Nur wenn das Minimum IM Kalenderjahr liegt, wird es als Perigäum ausgegeben.
-//   -> Sonst: "Kein Perigäum in diesem Jahr".
-// Außerdem: pro Körper eigener Try/Catch, damit ein Fehler bei Chiron nicht alles auf 0 setzt.
+// - Merkur–Pluto: pro rückläufiger Phase genau 1 Perigäum (Distanzminimum)
+// - Chiron: globales Distanzminimum im erweiterten Fenster (Jahr ± Pad),
+//           nur wenn Minimum IM Kalenderjahr liegt -> Datum, sonst "Kein Perigäum in diesem Jahr".
+//
+// Zusätzlich eingebaut (wie verlangt):
+// - DEBUG: zeigt, ob api/ephe in der Vercel-Function wirklich existiert + Dateiliste
+// - DEBUG: zeigt für Chiron ein paar Distanz-Samples + das gefundene globale Minimum (JD + Datum + inYear)
+// - Robustheit: Mode wird normalisiert (trim/uppercase), damit keine unsichtbaren Zeichen die Logik killen
+// - Robustheit: Distanz/Speed validieren (finite, >0)
 
-const BUILD_ID = "2025-12-20-CHIRON-YEARMIN-1";
 import SwissEph from "swisseph-wasm";
 import path from "path";
+import fs from "fs";
+
+const BUILD_ID = "2025-12-20-CHIRON-YEARMIN-1";
 
 export const config = { runtime: "nodejs" };
 
@@ -140,17 +145,9 @@ function globalMinWithPad(getDist, jdYearStart, jdYearEnd, padDays) {
 
 // ---------------- SwissEph access ----------------
 function normalizeCalcUtResult(raw) {
-  // raw kann sein: Array, Float64Array, oder { data: ... }
   if (!raw) return null;
-
-  // Array oder TypedArray direkt ok
   if (Array.isArray(raw) || ArrayBuffer.isView(raw)) return raw;
-
-  // Objekt mit .data
-  if (raw.data && (Array.isArray(raw.data) || ArrayBuffer.isView(raw.data))) {
-    return raw.data;
-  }
-
+  if (raw.data && (Array.isArray(raw.data) || ArrayBuffer.isView(raw.data))) return raw.data;
   return null;
 }
 
@@ -158,7 +155,13 @@ function makeCalc(swe, bodyId) {
   const flags = swe.SEFLG_SWIEPH | swe.SEFLG_SPEED;
 
   function safeCalcUt(jd) {
-    const raw = swe.calc_ut(jd, bodyId, flags);
+    let raw;
+    try {
+      raw = swe.calc_ut(jd, bodyId, flags);
+    } catch (e) {
+      throw new Error(`calc_ut Exception: ${String(e?.message || e)}`);
+    }
+
     const pos = normalizeCalcUtResult(raw);
     if (!pos || typeof pos.length !== "number" || pos.length < 4) {
       throw new Error("calc_ut lieferte kein gültiges Array/TypedArray");
@@ -169,11 +172,19 @@ function makeCalc(swe, bodyId) {
   return {
     getDist(jd) {
       const pos = safeCalcUt(jd);
-      return pos[2]; // Distanz (AU)
+      const d = pos[2]; // Distanz (AU)
+      if (!Number.isFinite(d) || d <= 0) {
+        throw new Error(`Ungültige Distanz: ${String(d)}`);
+      }
+      return d;
     },
     getLonSpeed(jd) {
       const pos = safeCalcUt(jd);
-      return pos[3]; // Längengeschwindigkeit (deg/day)
+      const sp = pos[3]; // Längengeschwindigkeit (deg/day)
+      if (!Number.isFinite(sp)) {
+        throw new Error(`Ungültige Speed: ${String(sp)}`);
+      }
+      return sp;
     }
   };
 }
@@ -231,6 +242,17 @@ function findRetroWindows(getLonSpeed, jdStart, jdEnd) {
   return windows.filter(([a, b]) => (b - a) > 1.0);
 }
 
+// Helper: Ephe-Dir Debug (was sieht die Function wirklich?)
+function listEpheDir(ephePath) {
+  try {
+    const exists = fs.existsSync(ephePath);
+    const files = exists ? fs.readdirSync(ephePath) : [];
+    return { ephePath, exists, files };
+  } catch (e) {
+    return { ephePath, exists: false, files: [], error: String(e?.message || e) };
+  }
+}
+
 export default async function handler(req, res) {
   setCorsHeaders(req, res);
   if (req.method === "OPTIONS") return res.status(200).end();
@@ -249,7 +271,6 @@ export default async function handler(req, res) {
       });
     }
 
-    // 1) WASM initialisieren
     await swe.initSwissEph();
 
     if (typeof swe.calc_ut !== "function") {
@@ -259,19 +280,23 @@ export default async function handler(req, res) {
       });
     }
 
-    // 2) Ephemeridenpfad setzen – DEIN Ordner liegt unter api/ephe
+    // Ephemeridenpfad setzen – Ordner liegt unter api/ephe
     const ephePath = path.join(process.cwd(), "api", "ephe");
+    const ephePathWithSlash = ephePath.endsWith(path.sep) ? ephePath : ephePath + path.sep;
 
     if (typeof swe.set_ephe_path === "function") {
-      swe.set_ephe_path(ephePath);
+      swe.set_ephe_path(ephePathWithSlash);
     } else if (typeof swe.swe_set_ephe_path === "function") {
-      swe.swe_set_ephe_path(ephePath);
+      swe.swe_set_ephe_path(ephePathWithSlash);
     } else {
       return res.status(500).json({
         ok: false,
         error: "SwissEph hat keine set_ephe_path/swe_set_ephe_path Methode. Paketversion prüfen."
       });
     }
+
+    // DEBUG: was sieht die Function im Dateisystem?
+    const epheDebug = listEpheDir(ephePath);
 
     // Exakt das Kalenderjahr (UTC)
     const jdYearStart = swe.julday(year, 1, 1, 0.0, swe.SE_GREG_CAL);
@@ -285,6 +310,9 @@ export default async function handler(req, res) {
     const results = [];
     let totalCount = 0;
 
+    // Extra Debug nur für Chiron
+    let chironDebug = null;
+
     for (const body of BODIES) {
       try {
         const bodyId = swe[body.id];
@@ -297,14 +325,52 @@ export default async function handler(req, res) {
         let perigees = [];
         let info = null;
 
-        if (body.mode === "SUN") {
+        // MODE robust normalisieren (trim/uppercase)
+        const mode = String(body.mode || "").trim().toUpperCase();
+
+        if (mode === "SUN") {
           const jdMin = minDistanceInWindow(getDist, jdYearStart, jdYearEnd);
           perigees = [{ datum: formatDateDE(jdToCalendar(jdMin)) }];
 
-        } else if (body.mode === "CHIRON_GLOBAL") {
-          // Chiron: globales Distanzminimum in erweitertem Fenster
+        } else if (mode === "CHIRON_GLOBAL") {
           const padChiron = 60; // ± 60 Tage
           const { jdMin, inYear } = globalMinWithPad(getDist, jdYearStart, jdYearEnd, padChiron);
+
+          // DEBUG: ein paar Samples + Ergebnis
+          if (body.id === "SE_CHIRON") {
+            const sampleJds = [
+              jdYearStart,
+              jdYearStart + 30,
+              jdYearStart + 120,
+              jdYearStart + 240,
+              jdYearEnd - 1
+            ];
+            const samples = sampleJds.map((jd) => {
+              let d = null, sp = null, err = null;
+              try { d = getDist(jd); } catch (e) { err = String(e?.message || e); }
+              try { sp = getLonSpeed(jd); } catch (e) { err = err || String(e?.message || e); }
+              return {
+                jd,
+                datum: formatDateDE(jdToCalendar(jd)),
+                distAU: d,
+                lonSpeed: sp,
+                error: err
+              };
+            });
+
+            chironDebug = {
+              modeRaw: body.mode,
+              modeNormalized: mode,
+              padDays: padChiron,
+              globalMin: {
+                jdMin,
+                datum: formatDateDE(jdToCalendar(jdMin)),
+                inYear
+              },
+              samples
+            };
+          }
+
           if (inYear) {
             perigees = [{ datum: formatDateDE(jdToCalendar(jdMin)) }];
           } else {
@@ -345,7 +411,6 @@ export default async function handler(req, res) {
         });
 
       } catch (err) {
-        // Körper-spezifischer Fehler darf NICHT alles killen.
         results.push({
           body: body.name,
           perigees: [],
@@ -355,13 +420,17 @@ export default async function handler(req, res) {
     }
 
     return res.status(200).json({
-  buildId: BUILD_ID,
-  ok: true,
-  year,
-  totalCount,
-  bodies: results
-});
-
+      buildId: BUILD_ID,
+      ok: true,
+      year,
+      totalCount,
+      debug: {
+        cwd: process.cwd(),
+        ephe: epheDebug
+      },
+      chironDebug,
+      bodies: results
+    });
 
   } catch (e) {
     console.error("Perigäum-Fehler:", e);
