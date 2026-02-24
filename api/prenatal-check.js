@@ -34,7 +34,6 @@ export default async function handler(req, res) {
 
     // Planeten ohne Merkur & Venus
     const planets = [
-      { name: "Mars", id: swe.SE_MARS },
       { name: "Jupiter", id: swe.SE_JUPITER },
       { name: "Saturn", id: swe.SE_SATURN },
       { name: "Uranus", id: swe.SE_URANUS },
