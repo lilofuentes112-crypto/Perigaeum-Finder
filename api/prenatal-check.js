@@ -1,6 +1,12 @@
 import SwissEph from "swisseph-wasm";
 
 export default async function handler(req, res) {
+
+  // CORS erlauben (für Wix-Embed)
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
   try {
     const { year, month, day } = req.query;
 
@@ -28,18 +34,19 @@ export default async function handler(req, res) {
 
     // Planeten ohne Merkur und Venus
     const planets = [
-      { name: "Mars", id: swe.SE_MARS },
-      { name: "Jupiter", id: swe.SE_JUPITER },
-      { name: "Saturn", id: swe.SE_SATURN },
-      { name: "Uranus", id: swe.SE_URANUS },
-      { name: "Neptun", id: swe.SE_NEPTUNE },
-      { name: "Pluto", id: swe.SE_PLUTO },
-      { name: "Chiron", id: swe.SE_CHIRON }
+      { name: "Mars", id: swe.SE_MARS, tolerance: 0.2 },
+      { name: "Jupiter", id: swe.SE_JUPITER, tolerance: 0.2 },
+      { name: "Saturn", id: swe.SE_SATURN, tolerance: 0.2 },
+      { name: "Uranus", id: swe.SE_URANUS, tolerance: 0.1 },
+      { name: "Neptun", id: swe.SE_NEPTUNE, tolerance: 0.1 },
+      { name: "Pluto", id: swe.SE_PLUTO, tolerance: 0.1 },
+      { name: "Chiron", id: swe.SE_CHIRON, tolerance: 0.1 }
     ];
 
     const results = [];
 
     for (const planet of planets) {
+
       const birthPos = swe.calc_ut(
         birthTjd,
         planet.id,
@@ -47,11 +54,11 @@ export default async function handler(req, res) {
       );
 
       const birthLongitude = birthPos[0];
-
       let foundDate = null;
 
-      // 270 Tage rückwärts
+      // 270 Tage rückwärts prüfen
       for (let i = 1; i <= 270; i++) {
+
         const tjd = birthTjd - i;
 
         const pos = swe.calc_ut(
@@ -68,14 +75,16 @@ export default async function handler(req, res) {
           diff = 360 - diff;
         }
 
-        // Toleranz 0.5°
-        if (diff < 0.5) {
+        if (diff < planet.tolerance) {
+
           const cal = swe.revjul(tjd, swe.SE_GREG_CAL);
+
           foundDate = {
             year: cal.year,
             month: cal.month,
             day: cal.day
           };
+
           break;
         }
       }
@@ -89,11 +98,18 @@ export default async function handler(req, res) {
 
     res.status(200).json({
       ok: true,
-      birthDate: { year: birthYear, month: birthMonth, day: birthDay },
+      birthDate: {
+        year: birthYear,
+        month: birthMonth,
+        day: birthDay
+      },
       results
     });
 
   } catch (e) {
-    res.status(500).json({ ok: false, error: String(e) });
+    res.status(500).json({
+      ok: false,
+      error: String(e)
+    });
   }
 }
