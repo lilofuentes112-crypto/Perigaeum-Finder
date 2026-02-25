@@ -1,6 +1,6 @@
+// api/jonas-mondphasen-year.js
 // Jonas-Mondphasen-Rechner
-// Berechnung der individuellen Mondphasen-Rückkehrpunkte
-// Goldstandard-Start (SwissEph init) + robuste Root-Suche
+// Berechnung der individuellen Mondphasen-Rückkehrpunkte (nur echter Return, keine Gegenphase)
 
 import SwissEph from "swisseph-wasm";
 
@@ -101,13 +101,15 @@ export default async function handler(req, res) {
      * start = ISO (UTC oder mit Offset)
      * end   = ISO
      * stepHours = Scan-Schrittweite (Standard 6)
+     * tolDeg = Toleranz in Grad für "echter Return" (Standard 0.2)
      */
-    const { birth, year, start, end, stepHours } = req.query;
+    const { birth, year, start, end, stepHours, tolDeg } = req.query;
 
     if (!birth) {
       return res.status(400).json({
         ok: false,
-        error: "Parameter fehlt: birth (ISO mit Zeitzone), z.B. birth=1999-11-18T20:10:00+01:00"
+        error:
+          "Parameter fehlt: birth (ISO mit Zeitzone), z.B. birth=1999-11-18T20:10:00+01:00"
       });
     }
 
@@ -136,8 +138,13 @@ export default async function handler(req, res) {
       return res.status(400).json({ ok: false, error: "end muss nach start liegen." });
     }
 
-    const stepH = stepHours ? Math.max(1, Math.min(24, toNumberOrThrow(stepHours, "stepHours"))) : 6;
+    const stepH = stepHours
+      ? Math.max(1, Math.min(24, toNumberOrThrow(stepHours, "stepHours")))
+      : 6;
     const stepMs = stepH * 60 * 60 * 1000;
+
+    // Toleranz für "echter Return" (Gegenphase wird dadurch ausgeschlossen)
+    const tol = tolDeg ? Math.max(0.01, Math.min(5, toNumberOrThrow(tolDeg, "tolDeg"))) : 0.2;
 
     // Zielwinkel (Mondphase bei Geburt)
     const jdBirth = jdFromUTCDate(swe, birthDate);
@@ -146,7 +153,7 @@ export default async function handler(req, res) {
     const fAtDate = (d) => {
       const jd = jdFromUTCDate(swe, d);
       const ang = phaseAngleDeg(swe, jd);
-      return { ang, f: signedDiffDeg(ang, targetAngle) };
+      return { ang, f: signedDiffDeg(ang, targetAngle) }; // f nahe 0 = echter Return
     };
 
     const returns = [];
@@ -154,7 +161,11 @@ export default async function handler(req, res) {
     let tPrev = new Date(startDate.getTime());
     let prev = fAtDate(tPrev);
 
-    for (let t = new Date(startDate.getTime() + stepMs); t <= endDate; t = new Date(t.getTime() + stepMs)) {
+    for (
+      let t = new Date(startDate.getTime() + stepMs);
+      t <= endDate;
+      t = new Date(t.getTime() + stepMs)
+    ) {
       const cur = fAtDate(t);
 
       // Root-Kandidat: Vorzeichenwechsel oder exakt 0
@@ -162,15 +173,22 @@ export default async function handler(req, res) {
         const root = refineRootBisection(swe, tPrev.getTime(), t.getTime(), targetAngle);
 
         if (root) {
-          // Duplikate vermeiden (falls zwei Intervalle denselben Root treffen)
-          const last = returns[returns.length - 1];
-          if (!last || Math.abs(new Date(last.datetime_utc).getTime() - root.getTime()) > 2 * 60 * 1000) {
-            const r = fAtDate(root);
-            returns.push({
-              datetime_utc: root.toISOString(),
-              phase_angle_deg: r.ang,
-              diff_deg: r.f
-            });
+          const r = fAtDate(root);
+
+          // --- WICHTIG: Nur echter Return, keine Gegenphase (±180°) ---
+          if (Math.abs(r.f) < tol) {
+            // Duplikate vermeiden (falls zwei Intervalle denselben Root treffen)
+            const last = returns[returns.length - 1];
+            if (
+              !last ||
+              Math.abs(new Date(last.datetime_utc).getTime() - root.getTime()) > 2 * 60 * 1000
+            ) {
+              returns.push({
+                datetime_utc: root.toISOString(),
+                phase_angle_deg: r.ang,
+                diff_deg: r.f
+              });
+            }
           }
         }
       }
@@ -186,6 +204,7 @@ export default async function handler(req, res) {
       start_utc: startDate.toISOString(),
       end_utc: endDate.toISOString(),
       step_hours: stepH,
+      tolerance_deg: tol,
       count: returns.length,
       returns
     });
