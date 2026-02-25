@@ -85,8 +85,69 @@ function refineRootBisection(swe, t0ms, t1ms, targetAngleDeg, maxIter = 70) {
   return new Date(Math.floor((a + b) / 2));
 }
 
+// -----------------------------
+// CORS / Origin-Allowlist
+// -----------------------------
+function isAllowedOrigin(origin) {
+  if (!origin) return true; // Direkter Browseraufruf ohne Origin (z.B. Tab) zulassen
+
+  const ALLOWED = new Set([
+    "https://astrogypsy.de",
+    "https://www.astrogypsy.de",
+    "https://intern.astrogypsy.de",
+    "https://www.intern.astrogypsy.de",
+
+    // Wix/Parastorage (Preview/Editor)
+    "https://editor.wix.com",
+    "https://www.wix.com",
+    "https://manage.wix.com",
+    "https://static.parastorage.com",
+    "https://static.wixstatic.com",
+  ]);
+
+  if (ALLOWED.has(origin)) return true;
+
+  // Wix-Seiten / Wix-Studio Previews (häufige Varianten)
+  if (/^https:\/\/.*\.wixsite\.com$/i.test(origin)) return true;
+  if (/^https:\/\/.*\.wixstudio\.io$/i.test(origin)) return true;
+
+  return false;
+}
+
+function applyCors(req, res) {
+  const origin = req.headers.origin || "";
+
+  // Für Debug/Tests im Browser-Tab ohne Origin: keine Allow-Origin setzen
+  if (origin && isAllowedOrigin(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+  }
+
+  res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type,Accept");
+  res.setHeader("Access-Control-Max-Age", "86400");
+}
+
 export default async function handler(req, res) {
   try {
+    // --- CORS immer zuerst (Wix braucht Preflight) ---
+    applyCors(req, res);
+
+    // Preflight
+    if (req.method === "OPTIONS") {
+      return res.status(204).end();
+    }
+
+    // Origin blocken (wenn vorhanden und nicht erlaubt)
+    const origin = req.headers.origin || "";
+    if (origin && !isAllowedOrigin(origin)) {
+      return res.status(403).json({ ok: false, error: `Origin nicht erlaubt: ${origin}` });
+    }
+
+    if (req.method !== "GET") {
+      return res.status(405).json({ ok: false, error: "Nur GET erlaubt." });
+    }
+
     // --- Goldstandard-Startcode ---
     const swe = new SwissEph();
     await swe.initSwissEph();
@@ -144,9 +205,7 @@ export default async function handler(req, res) {
     const stepMs = stepH * 60 * 60 * 1000;
 
     // Toleranz für "echter Return" (Gegenphase wird dadurch ausgeschlossen)
-    const tol = tolDeg
-      ? Math.max(0.01, Math.min(5, toNumberOrThrow(tolDeg, "tolDeg")))
-      : 0.2;
+    const tol = tolDeg ? Math.max(0.01, Math.min(5, toNumberOrThrow(tolDeg, "tolDeg"))) : 0.2;
 
     // Zielwinkel (Mondphase bei Geburt)
     const jdBirth = jdFromUTCDate(swe, birthDate);
@@ -183,8 +242,7 @@ export default async function handler(req, res) {
             const last = returns[returns.length - 1];
             if (
               !last ||
-              Math.abs(new Date(last.datetime_utc).getTime() - root.getTime()) >
-                2 * 60 * 1000
+              Math.abs(new Date(last.datetime_utc).getTime() - root.getTime()) > 2 * 60 * 1000
             ) {
               returns.push({
                 datetime_utc: root.toISOString(),
