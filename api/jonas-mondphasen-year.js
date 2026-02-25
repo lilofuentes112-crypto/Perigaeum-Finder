@@ -109,7 +109,7 @@ export default async function handler(req, res) {
       return res.status(400).json({
         ok: false,
         error:
-          "Parameter fehlt: birth (ISO mit Zeitzone), z.B. birth=1999-11-18T20:10:00+01:00"
+          "Parameter fehlt: birth (ISO mit Zeitzone), z.B. birth=1999-11-18T20:10:00+01:00",
       });
     }
 
@@ -125,7 +125,7 @@ export default async function handler(req, res) {
       if (!year) {
         return res.status(400).json({
           ok: false,
-          error: "Parameter fehlt: year ODER (start & end). Beispiel: &year=2026"
+          error: "Parameter fehlt: year ODER (start & end). Beispiel: &year=2026",
         });
       }
       const y = toNumberOrThrow(year, "year");
@@ -144,7 +144,9 @@ export default async function handler(req, res) {
     const stepMs = stepH * 60 * 60 * 1000;
 
     // Toleranz für "echter Return" (Gegenphase wird dadurch ausgeschlossen)
-    const tol = tolDeg ? Math.max(0.01, Math.min(5, toNumberOrThrow(tolDeg, "tolDeg"))) : 0.2;
+    const tol = tolDeg
+      ? Math.max(0.01, Math.min(5, toNumberOrThrow(tolDeg, "tolDeg")))
+      : 0.2;
 
     // Zielwinkel (Mondphase bei Geburt)
     const jdBirth = jdFromUTCDate(swe, birthDate);
@@ -181,12 +183,13 @@ export default async function handler(req, res) {
             const last = returns[returns.length - 1];
             if (
               !last ||
-              Math.abs(new Date(last.datetime_utc).getTime() - root.getTime()) > 2 * 60 * 1000
+              Math.abs(new Date(last.datetime_utc).getTime() - root.getTime()) >
+                2 * 60 * 1000
             ) {
               returns.push({
                 datetime_utc: root.toISOString(),
                 phase_angle_deg: r.ang,
-                diff_deg: r.f
+                diff_deg: r.f,
               });
             }
           }
@@ -206,7 +209,7 @@ export default async function handler(req, res) {
       step_hours: stepH,
       tolerance_deg: tol,
       count: returns.length,
-      returns
+      returns,
     });
   } catch (e) {
     return res.status(500).json({ ok: false, error: String(e?.message || e) });
