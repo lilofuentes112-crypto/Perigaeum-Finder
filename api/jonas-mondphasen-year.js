@@ -92,12 +92,13 @@ function isAllowedOrigin(origin) {
   if (!origin) return true; // Direkter Browseraufruf ohne Origin (z.B. Tab) zulassen
 
   const ALLOWED = new Set([
+    // Deine Domains
     "https://astrogypsy.de",
     "https://www.astrogypsy.de",
     "https://intern.astrogypsy.de",
     "https://www.intern.astrogypsy.de",
 
-    // Wix/Parastorage (Preview/Editor)
+    // Wix Kern
     "https://editor.wix.com",
     "https://www.wix.com",
     "https://manage.wix.com",
@@ -107,9 +108,14 @@ function isAllowedOrigin(origin) {
 
   if (ALLOWED.has(origin)) return true;
 
-  // Wix-Seiten / Wix-Studio Previews (häufige Varianten)
+  // Wix-Seiten / Wix-Studio / Previews (häufige Varianten)
   if (/^https:\/\/.*\.wixsite\.com$/i.test(origin)) return true;
   if (/^https:\/\/.*\.wixstudio\.io$/i.test(origin)) return true;
+
+  // Sehr häufig bei Wix-Publish/Assets/HTML-Komponente
+  if (/^https:\/\/.*\.filesusr\.com$/i.test(origin)) return true;
+  if (/^https:\/\/.*\.parastorage\.com$/i.test(origin)) return true;
+  if (/^https:\/\/.*\.wixstatic\.com$/i.test(origin)) return true;
 
   return false;
 }
@@ -117,7 +123,7 @@ function isAllowedOrigin(origin) {
 function applyCors(req, res) {
   const origin = req.headers.origin || "";
 
-  // Für Debug/Tests im Browser-Tab ohne Origin: keine Allow-Origin setzen
+  // Nur wenn Origin vorhanden UND erlaubt, setzen wir Allow-Origin
   if (origin && isAllowedOrigin(origin)) {
     res.setHeader("Access-Control-Allow-Origin", origin);
     res.setHeader("Vary", "Origin");
