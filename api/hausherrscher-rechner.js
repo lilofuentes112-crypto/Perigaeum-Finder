@@ -150,14 +150,11 @@ function houseIndexForLon(lon, cusps) {
     if (start === end) continue; // degenerate, shouldn't happen
 
     if (start < end) {
-      // normal interval
       if (L >= start && L < end) return i;
     } else {
-      // wraps over 0
       if (L >= start || L < end) return i;
     }
   }
-  // fallback (shouldn't happen)
   return 12;
 }
 
@@ -274,39 +271,22 @@ export default async function handler(req, res) {
 
     const tjd_ut = swe.julday(d.y, d.mo, d.d, utHour, swe.SE_GREG_CAL);
 
-// Houses (swisseph-wasm: Rückgabeform kann je nach Build variieren)
-const houseRes = await swe.houses_ex(
-  tjd_ut,
-  swe.SEFLG_SWIEPH,
-  latV,
-  lonV,
-  h
-);
+    // Houses (swisseph-wasm liefert hier ein Objekt mit keys: { cusps, ascmc })
+    const houseRes = await swe.houses_ex(
+      tjd_ut,
+      swe.SEFLG_SWIEPH,
+      latV,
+      lonV,
+      h
+    );
 
-// Cusps robust extrahieren
-let cusp =
-  houseRes?.cusp ||
-  houseRes?.cusps ||
-  houseRes?.data?.cusp ||
-  houseRes?.data?.cusps ||
-  (Array.isArray(houseRes) && houseRes.length && (houseRes[0]?.cusp || houseRes[0]?.cusps)) ||
-  (Array.isArray(houseRes) && houseRes.length >= 13 && houseRes) ||
-  null;
-
-// Manche Wrapper liefern [cusps, ascmc]
-if (!cusp && Array.isArray(houseRes) && houseRes.length === 2 && Array.isArray(houseRes[0])) {
-  cusp = houseRes[0];
-}
-
-// Validieren: wir brauchen Indizes 1..12 (also Länge >= 13)
-if (!cusp || !Array.isArray(cusp) || cusp.length < 13) {
-  return res.status(500).json({
-    ok: false,
-    error: "Häuserberechnung fehlgeschlagen (Cusps nicht gefunden).",
-    debug_houseRes_type: Array.isArray(houseRes) ? "array" : typeof houseRes,
-    debug_houseRes_keys: houseRes && !Array.isArray(houseRes) ? Object.keys(houseRes) : null,
-  });
-}
+    const cusp = houseRes?.cusps || null;
+    if (!cusp || !Array.isArray(cusp) || cusp.length < 13) {
+      return res.status(500).json({
+        ok: false,
+        error: "Häuserberechnung fehlgeschlagen (cusps nicht gefunden).",
+      });
+    }
 
     // Normalize cusps into 1..12
     const cusps = new Array(13).fill(0);
@@ -320,7 +300,7 @@ if (!cusp || !Array.isArray(cusp) || cusp.length < 13) {
       cuspSigns[i] = signIndexFromLon(cusps[i]);
     }
 
-    // Intercepted signs (only meaningful for Placidus-like systems; Whole Sign will yield none)
+    // Intercepted signs (Whole Sign ergibt automatisch keine Lücken)
     const mhSignsByHouse = interceptedSignsByHouse(cuspSigns);
 
     // Compute planet longitudes needed (rulers + MH rulers)
@@ -371,7 +351,7 @@ if (!cusp || !Array.isArray(cusp) || cusp.length < 13) {
         house: i,
         sign: signName,
         ruler: { planet: ruler, house: rulerHouse },
-        mh, // [] wenn keine
+        mh,
       });
     }
 
@@ -381,10 +361,16 @@ if (!cusp || !Array.isArray(cusp) || cusp.length < 13) {
       ok: true,
       system: systemName,
       hsys: h,
-      input: { date: `${d.y}-${String(d.mo).padStart(2, "0")}-${String(d.d).padStart(2, "0")}`, time: `${String(t.hh).padStart(2, "0")}:${String(t.mm).padStart(2, "0")}`, tz: tzH, lat: latV, lon: lonV },
+      input: {
+        date: `${d.y}-${String(d.mo).padStart(2, "0")}-${String(d.d).padStart(2, "0")}`,
+        time: `${String(t.hh).padStart(2, "0")}:${String(t.mm).padStart(2, "0")}`,
+        tz: tzH,
+        lat: latV,
+        lon: lonV,
+      },
       tjd_ut,
       cusps: {
-        deg: cusps.slice(1),          // 12 Werte
+        deg: cusps.slice(1),
         signs: cuspSigns.slice(1).map((x) => SIGN_DE[x]),
       },
       rows,
