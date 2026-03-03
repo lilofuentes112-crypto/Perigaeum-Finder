@@ -33,7 +33,6 @@ function isAllowedOrigin(origin) {
 
   if (ALLOWED.has(origin)) return true;
 
-  // Wix typische Varianten
   if (/^https:\/\/.*\.wixsite\.com$/i.test(origin)) return true;
   if (/^https:\/\/.*\.wixstudio\.io$/i.test(origin)) return true;
   if (/^https:\/\/.*\.filesusr\.com$/i.test(origin)) return true;
@@ -82,7 +81,7 @@ function norm360(x) {
 
 function signIndexFromLon(lon) {
   const L = norm360(lon);
-  return Math.floor(L / 30); // 0..11
+  return Math.floor(L / 30);
 }
 
 function parseDate(dateStr) {
@@ -109,7 +108,7 @@ function parseTz(tzStr) {
   if (!s) return null;
   const v = Number(s);
   if (!Number.isFinite(v) || Math.abs(v) > 14) return null;
-  return v; // hours
+  return v;
 }
 
 function parseFloatParam(x) {
@@ -132,13 +131,12 @@ function modDist(start, x) {
   return norm360(x - start);
 }
 
-// House length start->end (mod 360), always positive (0..360)
+// House length start->end (mod 360), always positive
 function houseLen(start, end) {
   return norm360(end - start);
 }
 
 // Find house index 1..12 for a longitude, using cusp degrees (1..12)
-// Rule: start inclusive, end exclusive. If exactly on cusp, it belongs to the new house.
 function houseIndexForLon(lon, cusps) {
   const L = norm360(lon);
   for (let i = 1; i <= 12; i++) {
@@ -170,7 +168,7 @@ function houseStringWith10pct(lon, cusps) {
   return `${H}`;
 }
 
-// Ruler mapping (German planet names), with Virgo -> Chiron
+// Ruler mapping, Jungfrau -> Chiron
 function rulerForSign(signIdx) {
   switch (signIdx) {
     case 0: return "Mars";
@@ -178,7 +176,7 @@ function rulerForSign(signIdx) {
     case 2: return "Merkur";
     case 3: return "Mond";
     case 4: return "Sonne";
-    case 5: return "Chiron";   // Sonderregel Jungfrau
+    case 5: return "Chiron";
     case 6: return "Venus";
     case 7: return "Pluto";
     case 8: return "Jupiter";
@@ -189,7 +187,6 @@ function rulerForSign(signIdx) {
   }
 }
 
-// Planet constants for SwissEph
 function planetIdByName(swe, name) {
   switch (name) {
     case "Sonne": return swe.SE_SUN;
@@ -207,9 +204,9 @@ function planetIdByName(swe, name) {
   }
 }
 
-// MH via Zeichenfolge: fehlende Zeichen zwischen cuspSign[i] und cuspSign[i+1]
+// MH: fehlende Zeichen zwischen cuspSign[i] und cuspSign[i+1]
 function interceptedSignsByHouse(cuspSigns) {
-  const mhSigns = Array.from({ length: 13 }, () => []); // 1..12
+  const mhSigns = Array.from({ length: 13 }, () => []);
   for (let i = 1; i <= 12; i++) {
     const cur = cuspSigns[i];
     const next = cuspSigns[i === 12 ? 1 : i + 1];
@@ -222,37 +219,76 @@ function interceptedSignsByHouse(cuspSigns) {
   return mhSigns;
 }
 
-// SwissEph Houses (Placidus) holen: swisseph-wasm liefert { cusps, ascmc }
-async function getPlacidusHouses(swe, tjd_ut, latV, lonV) {
-  const houseRes = await swe.houses_ex(
-    tjd_ut,
-    swe.SEFLG_SWIEPH,
-    latV,
-    lonV,
-    "P"
+// --- Robust Extractors (cusps/ascmc können je nach Build anders heissen) ---
+function extractCusps(houseRes) {
+  return (
+    houseRes?.cusps ||
+    houseRes?.cusp ||
+    houseRes?.data?.cusps ||
+    houseRes?.data?.cusp ||
+    null
   );
-
-  const cuspsRaw = houseRes?.cusps || null;
-  const ascmcRaw = houseRes?.ascmc || null;
-
-  if (!cuspsRaw || !Array.isArray(cuspsRaw) || cuspsRaw.length < 13) {
-    return { ok: false, error: "Häuserberechnung fehlgeschlagen (Placidus: cusps fehlen)." };
-  }
-  if (!ascmcRaw || !Array.isArray(ascmcRaw) || ascmcRaw.length < 2) {
-    return { ok: false, error: "Häuserberechnung fehlgeschlagen (Placidus: ascmc fehlt)." };
-  }
-
-  // normalize cusps into index 1..12
-  const cusps = new Array(13).fill(0);
-  for (let i = 1; i <= 12; i++) cusps[i] = norm360(cuspsRaw[i]);
-
-  // Asc aus ascmc[0]
-  const ascLon = norm360(ascmcRaw[0]);
-
-  return { ok: true, cusps, ascLon };
 }
 
-// Whole Sign Houses aus Asc-Zeichen bauen
+function extractAscmc(houseRes) {
+  return (
+    houseRes?.ascmc ||
+    houseRes?.ascMC ||
+    houseRes?.data?.ascmc ||
+    houseRes?.data?.ascMC ||
+    null
+  );
+}
+
+// Placidus-Houses holen (probiert mehrere Signaturen)
+async function getPlacidusHouses(swe, tjd_ut, latV, lonV) {
+  const tries = [
+    { label: 'houses_ex("P")', args: [tjd_ut, swe.SEFLG_SWIEPH, latV, lonV, "P"] },
+    { label: 'houses_ex("P".charCodeAt(0))', args: [tjd_ut, swe.SEFLG_SWIEPH, latV, lonV, "P".charCodeAt(0)] },
+  ];
+
+  let lastDebug = null;
+
+  for (const tr of tries) {
+    try {
+      const houseRes = await swe.houses_ex(...tr.args);
+      const cuspsRaw = extractCusps(houseRes);
+      const ascmcRaw = extractAscmc(houseRes);
+
+      lastDebug = {
+        label: tr.label,
+        type: Array.isArray(houseRes) ? "array" : typeof houseRes,
+        keys: houseRes && !Array.isArray(houseRes) ? Object.keys(houseRes) : null,
+        hasCusps: !!cuspsRaw,
+        cuspsType: Array.isArray(cuspsRaw) ? "array" : typeof cuspsRaw,
+        cuspsLen: Array.isArray(cuspsRaw) ? cuspsRaw.length : null,
+        hasAscmc: !!ascmcRaw,
+        ascmcType: Array.isArray(ascmcRaw) ? "array" : typeof ascmcRaw,
+        ascmcLen: Array.isArray(ascmcRaw) ? ascmcRaw.length : null,
+      };
+
+      if (!cuspsRaw || !Array.isArray(cuspsRaw) || cuspsRaw.length < 13) continue;
+      if (!ascmcRaw || !Array.isArray(ascmcRaw) || ascmcRaw.length < 1) continue;
+
+      const cusps = new Array(13).fill(0);
+      for (let i = 1; i <= 12; i++) cusps[i] = norm360(cuspsRaw[i]);
+
+      const ascLon = norm360(ascmcRaw[0]);
+
+      return { ok: true, cusps, ascLon };
+    } catch (e) {
+      lastDebug = { label: tr.label, thrown: String(e?.message || e) };
+    }
+  }
+
+  return {
+    ok: false,
+    error: "Häuserberechnung fehlgeschlagen (Placidus: cusps fehlen).",
+    debug: lastDebug,
+  };
+}
+
+// Whole Sign Cusps aus Asc-Zeichen bauen
 function buildWholeSignCuspsFromAsc(ascLon) {
   const ascSign = signIndexFromLon(ascLon);
   const cusps = new Array(13).fill(0);
@@ -299,10 +335,8 @@ export default async function handler(req, res) {
     if (lonV === null || lonV < -180 || lonV > 180) return res.status(400).json({ ok: false, error: "Parameter lon fehlt/ungültig (-180..180, Ost +, West -)." });
     if (!h) return res.status(400).json({ ok: false, error: "Parameter hsys ungültig (P oder W)." });
 
-    // --- SwissEph Goldstandard ---
     const swe = new SwissEph();
     await swe.initSwissEph();
-    // --- Ende Goldstandard ---
 
     // Lokalzeit -> UT (lokal = UTC + tz)
     const localHour = t.hh + t.mm / 60;
@@ -310,13 +344,18 @@ export default async function handler(req, res) {
 
     const tjd_ut = swe.julday(d.y, d.mo, d.d, utHour, swe.SE_GREG_CAL);
 
-    // Immer zuerst Placidus-Häuser holen (für Asc), daraus ggf. Whole Sign bauen
+    // Placidus holen (für Asc und optional für Placidus-Ausgabe)
     const ph = await getPlacidusHouses(swe, tjd_ut, latV, lonV);
-    if (!ph.ok) return res.status(500).json({ ok: false, error: ph.error });
+    if (!ph.ok) {
+      return res.status(500).json({
+        ok: false,
+        error: ph.error,
+        debug: ph.debug || null,
+      });
+    }
 
-    const cusps = (h === "P")
-      ? ph.cusps
-      : buildWholeSignCuspsFromAsc(ph.ascLon);
+    // Output-Cusps je nach System
+    const cusps = (h === "P") ? ph.cusps : buildWholeSignCuspsFromAsc(ph.ascLon);
 
     // Cusp signs
     const cuspSigns = new Array(13).fill(0);
@@ -324,36 +363,33 @@ export default async function handler(req, res) {
       cuspSigns[i] = signIndexFromLon(cusps[i]);
     }
 
-    // Intercepted signs: nur bei Placidus sinnvoll
-    const mhSignsByHouse = (h === "P")
-      ? interceptedSignsByHouse(cuspSigns)
-      : Array.from({ length: 13 }, () => []);
+    // Intercepted signs nur bei Placidus
+    const mhSignsByHouse =
+      (h === "P") ? interceptedSignsByHouse(cuspSigns) : Array.from({ length: 13 }, () => []);
 
-    // Compute planet longitudes needed (rulers + MH rulers)
+    // benötigte Planeten
     const neededPlanetNames = new Set();
     for (let i = 1; i <= 12; i++) {
       neededPlanetNames.add(rulerForSign(cuspSigns[i]));
       for (const sIdx of mhSignsByHouse[i]) neededPlanetNames.add(rulerForSign(sIdx));
     }
 
-    // Calc longitudes
+    // Planeten berechnen
     const planetLon = {};
     const flags = swe.SEFLG_SWIEPH;
 
     for (const pName of neededPlanetNames) {
       const pid = planetIdByName(swe, pName);
-      if (pid == null) {
-        return res.status(500).json({ ok: false, error: `Unbekannter Planet in Mapping: ${pName}` });
-      }
+      if (pid == null) return res.status(500).json({ ok: false, error: `Unbekannter Planet in Mapping: ${pName}` });
+
       const r = swe.calc_ut(tjd_ut, pid, flags);
       const lonEcl = r?.data?.[0];
-      if (!Number.isFinite(lonEcl)) {
-        return res.status(500).json({ ok: false, error: `Planetberechnung fehlgeschlagen: ${pName}` });
-      }
+      if (!Number.isFinite(lonEcl)) return res.status(500).json({ ok: false, error: `Planetberechnung fehlgeschlagen: ${pName}` });
+
       planetLon[pName] = norm360(lonEcl);
     }
 
-    // Build rows
+    // Rows bauen
     const rows = [];
     for (let i = 1; i <= 12; i++) {
       const signIdx = cuspSigns[i];
@@ -366,11 +402,7 @@ export default async function handler(req, res) {
       for (const sIdx of mhSignsByHouse[i]) {
         const mhRuler = rulerForSign(sIdx);
         const mhHouse = houseStringWith10pct(planetLon[mhRuler], cusps);
-        mh.push({
-          sign: SIGN_DE[sIdx],
-          planet: mhRuler,
-          house: mhHouse,
-        });
+        mh.push({ sign: SIGN_DE[sIdx], planet: mhRuler, house: mhHouse });
       }
 
       rows.push({
@@ -396,7 +428,7 @@ export default async function handler(req, res) {
       },
       tjd_ut,
       cusps: {
-        deg: cusps.slice(1), // 12 Werte
+        deg: cusps.slice(1),
         signs: cuspSigns.slice(1).map((x) => SIGN_DE[x]),
       },
       rows,
