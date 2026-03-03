@@ -274,13 +274,19 @@ export default async function handler(req, res) {
 
     const tjd_ut = swe.julday(d.y, d.mo, d.d, utHour, swe.SE_GREG_CAL);
 
-    // Houses
-    // swe.houses(tjd_ut, lat, lon, hsys) returns { cusp: [..], ascmc: [..] } in many bindings
-    const houseRes = swe.houses(tjd_ut, latV, lonV, h);
-    const cusp = houseRes?.cusp || houseRes?.cusps || null;
-    if (!cusp || !Array.isArray(cusp) || cusp.length < 13) {
-      return res.status(500).json({ ok: false, error: "Häuserberechnung fehlgeschlagen (SwissEph houses)." });
-    }
+   // Houses (swisseph-wasm: houses_ex)
+const houseRes = swe.houses_ex(
+  tjd_ut,
+  swe.SEFLG_SWIEPH,
+  latV,
+  lonV,
+  h
+);
+
+const cusp = houseRes?.cusp || houseRes?.cusps || null;
+if (!cusp || !Array.isArray(cusp) || cusp.length < 13) {
+  return res.status(500).json({ ok: false, error: "Häuserberechnung fehlgeschlagen (SwissEph houses_ex)." });
+}
 
     // Normalize cusps into 1..12
     const cusps = new Array(13).fill(0);
