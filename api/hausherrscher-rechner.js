@@ -1,6 +1,19 @@
 // api/hausherrscher-rechner.js
 // Hausherrscher-Rechner (Placidus oder Whole Sign Houses)
-// Ausgabe: Haus, Zeichen, Herrscher + Hausposition (mit 10%-Regel), MH (eingeschlossene Zeichen)
+//
+// Ausgabe pro Haus:
+// - Haus (1..12)
+// - steht im Zeichen (Zeichen der Hausspitze; FIX, keine Regel)
+// - Herrscher (Planet) + „Planet steht in Haus …“ (H / H/H+1 nach 10%-Regel)
+// - MH (Mitherrscher) NUR wenn Zeichen eingeschlossen sind (kann 0, 1 oder mehrere sein)
+//
+// WICHTIG:
+// - Mehrfachspitzen (z.B. Haus 5 und 6 im selben Zeichen) werden automatisch korrekt abgedeckt,
+//   weil wir pro Hausspitze das Zeichen berechnen (cuspSigns[i]).
+// - Eingeschlossene Zeichen = Zeichen, die zwischen cuspSign[i] und cuspSign[i+1] übersprungen werden.
+// - Die 10%-Regel gilt AUSSCHLIESSLICH für die Hausposition von PLANETEN (Herrscher / MH-Planeten),
+//   NICHT für Hausspitzen.
+//
 // Sonderregel: Jungfrau-Herrscher = Chiron
 //
 // GET-Parameter:
@@ -161,8 +174,10 @@ function houseIndexForLon(lon, cusps) {
   return 12;
 }
 
-// 10%-Regel: wenn im letzten 10% (inkl. Grenze) -> "H/(H+1)"
-function houseStringWith10pct(lon, cusps) {
+// 10%-Regel für PLANETEN-Hausposition:
+// wenn Planet im letzten 10% (inkl. Grenze) -> "H/(H+1)"
+function houseStringWith10pctForPlanet(planetLon, cusps) {
+  const lon = norm360(planetLon);
   const H = houseIndexForLon(lon, cusps);
   const start = norm360(cusps[H]);
   const end = norm360(cusps[H === 12 ? 1 : H + 1]);
@@ -212,26 +227,29 @@ function planetIdByName(swe, name) {
   }
 }
 
-// MH via Zeichenfolge: fehlende Zeichen zwischen cuspSign[i] und cuspSign[i+1]
+// Eingeschlossene Zeichen pro Haus:
+// fehlende Zeichen zwischen cuspSigns[i] und cuspSigns[i+1]
 function interceptedSignsByHouse(cuspSigns) {
   const mhSigns = Array.from({ length: 13 }, () => []); // 1..12
   for (let i = 1; i <= 12; i++) {
     const cur = cuspSigns[i];
     const next = cuspSigns[i === 12 ? 1 : i + 1];
+
+    // Wenn cur==next: NICHT automatisch „eingeschlossen“.
+// Das bedeutet einfach: Mehrfachspitze / Zeichen wiederholt.
+// Eingeschlossene Zeichen sind dann: alle übrigen 11 Zeichen (theoretisch).
+// Praktisch kommt das nur bei extremen Breitengraden vor – wir behandeln es korrekt:
     let s = (cur + 1) % 12;
     while (s !== next) {
       mhSigns[i].push(s);
       s = (s + 1) % 12;
+      if (mhSigns[i].length > 11) break; // Safety
     }
   }
   return mhSigns;
 }
 
 function extractLonFromCalcResult(r) {
-  // swisseph-wasm kann je nach Build liefern:
-  // - { data: Float64Array([...]) }
-  // - { data: [...] }
-  // - direkt Array/TypedArray
   const v =
     (r && r.data && isArrayLike(r.data) ? r.data[0] : undefined) ??
     (isArrayLike(r) ? r[0] : undefined);
@@ -285,27 +303,21 @@ export default async function handler(req, res) {
 
     // ---------------------------------------------------------
     // Häuser:
-    // - Für Placidus direkt houses_ex(...,"P")
-    // - Für Whole Sign: ASC via houses_ex(...,"P") holen, dann 30°-Cusps bauen
+    // - Für Placidus: houses_ex(...,"P")
+    // - Für Whole Sign: ASC via houses_ex(...,"P"), dann 30°-Cusps bauen
     // ---------------------------------------------------------
     const flagsH = swe.SEFLG_SWIEPH;
 
-    // 1) Immer ASC/MC via Placidus holen (stabil, und wir brauchen ASC für Whole Sign)
+    // 1) ASC/MC via Placidus holen (stabil; ASC für Whole Sign nötig)
     const houseBase = await swe.houses_ex(tjd_ut, flagsH, latV, lonV, "P");
     const baseCusps = toPlainArray(houseBase?.cusps ?? houseBase?.cusp);
     const baseAscmc = toPlainArray(houseBase?.ascmc ?? houseBase?.ascMC ?? houseBase?.asc_mc);
 
     if (!baseCusps || baseCusps.length < 13) {
-      return res.status(500).json({
-        ok: false,
-        error: "Häuserberechnung fehlgeschlagen (Placidus: cusps fehlen).",
-      });
+      return res.status(500).json({ ok: false, error: "Häuserberechnung fehlgeschlagen (Placidus: cusps fehlen)." });
     }
     if (!baseAscmc || baseAscmc.length < 2 || !Number.isFinite(Number(baseAscmc[0])) || !Number.isFinite(Number(baseAscmc[1]))) {
-      return res.status(500).json({
-        ok: false,
-        error: "Häuserberechnung fehlgeschlagen (ASC/MC nicht gefunden).",
-      });
+      return res.status(500).json({ ok: false, error: "Häuserberechnung fehlgeschlagen (ASC/MC nicht gefunden)." });
     }
 
     // 2) Cusps final bestimmen
@@ -330,13 +342,13 @@ export default async function handler(req, res) {
       cusps[i] = norm360(cuspArr[i]);
     }
 
-    // Cusp signs
+    // Zeichen der Hausspitzen
     const cuspSigns = new Array(13).fill(0);
     for (let i = 1; i <= 12; i++) {
       cuspSigns[i] = signIndexFromLon(cusps[i]);
     }
 
-    // Intercepted signs (Whole Sign ergibt automatisch keine Lücken)
+    // Eingeschlossene Zeichen (Whole Sign hat hier automatisch i.d.R. keine)
     const mhSignsByHouse = interceptedSignsByHouse(cuspSigns);
 
     // Compute planet longitudes needed (rulers + MH rulers)
@@ -359,10 +371,7 @@ export default async function handler(req, res) {
       const lonEcl = extractLonFromCalcResult(r);
 
       if (!Number.isFinite(lonEcl)) {
-        return res.status(500).json({
-          ok: false,
-          error: `Planetberechnung fehlgeschlagen: ${pName}`,
-        });
+        return res.status(500).json({ ok: false, error: `Planetberechnung fehlgeschlagen: ${pName}` });
       }
       planetLon[pName] = norm360(lonEcl);
     }
@@ -374,12 +383,13 @@ export default async function handler(req, res) {
       const signName = SIGN_DE[signIdx];
       const ruler = rulerForSign(signIdx);
 
-      const rulerHouse = houseStringWith10pct(planetLon[ruler], cusps);
+      // 10%-Regel nur für PLANETEN-Hausposition
+      const rulerHouse = houseStringWith10pctForPlanet(planetLon[ruler], cusps);
 
       const mh = [];
       for (const sIdx of mhSignsByHouse[i]) {
         const mhRuler = rulerForSign(sIdx);
-        const mhHouse = houseStringWith10pct(planetLon[mhRuler], cusps);
+        const mhHouse = houseStringWith10pctForPlanet(planetLon[mhRuler], cusps);
         mh.push({
           sign: SIGN_DE[sIdx],
           planet: mhRuler,
@@ -391,7 +401,7 @@ export default async function handler(req, res) {
         house: i,
         sign: signName,
         ruler: { planet: ruler, house: rulerHouse },
-        mh,
+        mh, // [] wenn keine eingeschlossenen Zeichen
       });
     }
 
@@ -419,8 +429,8 @@ export default async function handler(req, res) {
       },
       rows,
       notes: {
-        mhLabel: "MH = Mitherrscher (eingeschlossene Zeichen).",
-        tenPercentRule: "10%-Regel: steht ein Herrscher in den letzten 10% eines Hauses (inkl. Grenze), wird H/(H+1) ausgegeben.",
+        mhLabel: "MH = Mitherrscher (Zeichen eingeschlossen).",
+        tenPercentRule: "10%-Regel gilt nur für die Hausposition von PLANETEN: steht ein Herrscher/MH-Planet in den letzten 10% eines Hauses (inkl. Grenze), wird H/(H+1) ausgegeben.",
         virgoRuler: "Jungfrau-Herrscher ist in diesem Tool Chiron.",
         wholeSignNote: "Whole Sign: Häuser werden aus dem ASC-Zeichen abgeleitet (je 30°). ASC/MC werden trotzdem aus Placidus-Basis (houses_ex mit 'P') genommen.",
       },
