@@ -1,5 +1,6 @@
 // api/hausherrscher-rechner.js
 // Hausherrscher-Rechner (Placidus oder Whole Sign Houses)
+//
 // Ausgabe: Haus, Zeichen, Herrscher + Hausposition (mit 10%-Regel), MH (eingeschlossene Zeichen)
 // Sonderregel: Jungfrau-Herrscher = Chiron
 //
@@ -85,7 +86,6 @@ function signIndexFromLon(lon) {
 }
 
 function parseDate(dateStr) {
-  // YYYY-MM-DD
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(dateStr || "").trim());
   if (!m) return null;
   const y = Number(m[1]);
@@ -96,7 +96,6 @@ function parseDate(dateStr) {
 }
 
 function parseTime(timeStr) {
-  // HH:MM
   const m = /^(\d{1,2}):(\d{2})$/.exec(String(timeStr || "").trim());
   if (!m) return null;
   const hh = Number(m[1]);
@@ -106,7 +105,6 @@ function parseTime(timeStr) {
 }
 
 function parseTz(tzStr) {
-  // "+1", "-6", "+2.5"
   const s = String(tzStr || "").trim();
   if (!s) return null;
   const v = Number(s);
@@ -147,7 +145,7 @@ function houseIndexForLon(lon, cusps) {
     const start = norm360(cusps[i]);
     const end = norm360(cusps[i === 12 ? 1 : i + 1]);
 
-    if (start === end) continue; // degenerate, shouldn't happen
+    if (start === end) continue;
 
     if (start < end) {
       if (L >= start && L < end) return i;
@@ -175,18 +173,18 @@ function houseStringWith10pct(lon, cusps) {
 // Ruler mapping (German planet names), with Virgo -> Chiron
 function rulerForSign(signIdx) {
   switch (signIdx) {
-    case 0: return "Mars";      // Widder
-    case 1: return "Venus";     // Stier
-    case 2: return "Merkur";    // Zwillinge
-    case 3: return "Mond";      // Krebs
-    case 4: return "Sonne";     // Löwe
-    case 5: return "Chiron";    // Jungfrau (Sonderregel)
-    case 6: return "Venus";     // Waage
-    case 7: return "Pluto";     // Skorpion
-    case 8: return "Jupiter";   // Schütze
-    case 9: return "Saturn";    // Steinbock
-    case 10: return "Uranus";   // Wassermann
-    case 11: return "Neptun";   // Fische
+    case 0: return "Mars";
+    case 1: return "Venus";
+    case 2: return "Merkur";
+    case 3: return "Mond";
+    case 4: return "Sonne";
+    case 5: return "Chiron";   // Sonderregel Jungfrau
+    case 6: return "Venus";
+    case 7: return "Pluto";
+    case 8: return "Jupiter";
+    case 9: return "Saturn";
+    case 10: return "Uranus";
+    case 11: return "Neptun";
     default: return "?";
   }
 }
@@ -222,6 +220,47 @@ function interceptedSignsByHouse(cuspSigns) {
     }
   }
   return mhSigns;
+}
+
+// SwissEph Houses (Placidus) holen: swisseph-wasm liefert { cusps, ascmc }
+async function getPlacidusHouses(swe, tjd_ut, latV, lonV) {
+  const houseRes = await swe.houses_ex(
+    tjd_ut,
+    swe.SEFLG_SWIEPH,
+    latV,
+    lonV,
+    "P"
+  );
+
+  const cuspsRaw = houseRes?.cusps || null;
+  const ascmcRaw = houseRes?.ascmc || null;
+
+  if (!cuspsRaw || !Array.isArray(cuspsRaw) || cuspsRaw.length < 13) {
+    return { ok: false, error: "Häuserberechnung fehlgeschlagen (Placidus: cusps fehlen)." };
+  }
+  if (!ascmcRaw || !Array.isArray(ascmcRaw) || ascmcRaw.length < 2) {
+    return { ok: false, error: "Häuserberechnung fehlgeschlagen (Placidus: ascmc fehlt)." };
+  }
+
+  // normalize cusps into index 1..12
+  const cusps = new Array(13).fill(0);
+  for (let i = 1; i <= 12; i++) cusps[i] = norm360(cuspsRaw[i]);
+
+  // Asc aus ascmc[0]
+  const ascLon = norm360(ascmcRaw[0]);
+
+  return { ok: true, cusps, ascLon };
+}
+
+// Whole Sign Houses aus Asc-Zeichen bauen
+function buildWholeSignCuspsFromAsc(ascLon) {
+  const ascSign = signIndexFromLon(ascLon);
+  const cusps = new Array(13).fill(0);
+  for (let i = 1; i <= 12; i++) {
+    const s = (ascSign + (i - 1)) % 12;
+    cusps[i] = norm360(s * 30);
+  }
+  return cusps;
 }
 
 // -----------------------------
@@ -271,31 +310,13 @@ export default async function handler(req, res) {
 
     const tjd_ut = swe.julday(d.y, d.mo, d.d, utHour, swe.SE_GREG_CAL);
 
-   // Houses (swisseph-wasm liefert hier ein Objekt mit keys: { cusps, ascmc })
-// hsys als ASCII-Code übergeben (SwissEph erwartet Zahl)
-const hsysCode = h.charCodeAt(0);
+    // Immer zuerst Placidus-Häuser holen (für Asc), daraus ggf. Whole Sign bauen
+    const ph = await getPlacidusHouses(swe, tjd_ut, latV, lonV);
+    if (!ph.ok) return res.status(500).json({ ok: false, error: ph.error });
 
-const houseRes = await swe.houses_ex(
-  tjd_ut,
-  swe.SEFLG_SWIEPH,
-  latV,
-  lonV,
-  hsysCode
-);
-
-    const cusp = houseRes?.cusps || null;
-    if (!cusp || !Array.isArray(cusp) || cusp.length < 13) {
-      return res.status(500).json({
-        ok: false,
-        error: "Häuserberechnung fehlgeschlagen (cusps nicht gefunden).",
-      });
-    }
-
-    // Normalize cusps into 1..12
-    const cusps = new Array(13).fill(0);
-    for (let i = 1; i <= 12; i++) {
-      cusps[i] = norm360(cusp[i]);
-    }
+    const cusps = (h === "P")
+      ? ph.cusps
+      : buildWholeSignCuspsFromAsc(ph.ascLon);
 
     // Cusp signs
     const cuspSigns = new Array(13).fill(0);
@@ -303,8 +324,10 @@ const houseRes = await swe.houses_ex(
       cuspSigns[i] = signIndexFromLon(cusps[i]);
     }
 
-    // Intercepted signs (Whole Sign ergibt automatisch keine Lücken)
-    const mhSignsByHouse = interceptedSignsByHouse(cuspSigns);
+    // Intercepted signs: nur bei Placidus sinnvoll
+    const mhSignsByHouse = (h === "P")
+      ? interceptedSignsByHouse(cuspSigns)
+      : Array.from({ length: 13 }, () => []);
 
     // Compute planet longitudes needed (rulers + MH rulers)
     const neededPlanetNames = new Set();
@@ -373,7 +396,7 @@ const houseRes = await swe.houses_ex(
       },
       tjd_ut,
       cusps: {
-        deg: cusps.slice(1),
+        deg: cusps.slice(1), // 12 Werte
         signs: cuspSigns.slice(1).map((x) => SIGN_DE[x]),
       },
       rows,
@@ -381,6 +404,7 @@ const houseRes = await swe.houses_ex(
         mhLabel: "MH = Mitherrscher (eingeschlossene Zeichen).",
         tenPercentRule: "10%-Regel: steht ein Herrscher in den letzten 10% eines Hauses (inkl. Grenze), wird H/(H+1) ausgegeben.",
         virgoRuler: "Jungfrau-Herrscher ist in diesem Tool Chiron.",
+        wholeSignNote: "Whole Sign Houses werden aus dem Aszendenten-Zeichen gebildet (je 30° pro Haus).",
       },
     });
   } catch (e) {
