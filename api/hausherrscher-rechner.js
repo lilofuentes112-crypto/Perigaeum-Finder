@@ -274,8 +274,8 @@ export default async function handler(req, res) {
 
     const tjd_ut = swe.julday(d.y, d.mo, d.d, utHour, swe.SE_GREG_CAL);
 
-   // Houses (swisseph-wasm: houses_ex)
-const houseRes = swe.houses_ex(
+// Houses (swisseph-wasm: Rückgabeform kann je nach Build variieren)
+const houseRes = await swe.houses_ex(
   tjd_ut,
   swe.SEFLG_SWIEPH,
   latV,
@@ -283,9 +283,29 @@ const houseRes = swe.houses_ex(
   h
 );
 
-const cusp = houseRes?.cusp || houseRes?.cusps || null;
+// Cusps robust extrahieren
+let cusp =
+  houseRes?.cusp ||
+  houseRes?.cusps ||
+  houseRes?.data?.cusp ||
+  houseRes?.data?.cusps ||
+  (Array.isArray(houseRes) && houseRes.length && (houseRes[0]?.cusp || houseRes[0]?.cusps)) ||
+  (Array.isArray(houseRes) && houseRes.length >= 13 && houseRes) ||
+  null;
+
+// Manche Wrapper liefern [cusps, ascmc]
+if (!cusp && Array.isArray(houseRes) && houseRes.length === 2 && Array.isArray(houseRes[0])) {
+  cusp = houseRes[0];
+}
+
+// Validieren: wir brauchen Indizes 1..12 (also Länge >= 13)
 if (!cusp || !Array.isArray(cusp) || cusp.length < 13) {
-  return res.status(500).json({ ok: false, error: "Häuserberechnung fehlgeschlagen (SwissEph houses_ex)." });
+  return res.status(500).json({
+    ok: false,
+    error: "Häuserberechnung fehlgeschlagen (Cusps nicht gefunden).",
+    debug_houseRes_type: Array.isArray(houseRes) ? "array" : typeof houseRes,
+    debug_houseRes_keys: houseRes && !Array.isArray(houseRes) ? Object.keys(houseRes) : null,
+  });
 }
 
     // Normalize cusps into 1..12
