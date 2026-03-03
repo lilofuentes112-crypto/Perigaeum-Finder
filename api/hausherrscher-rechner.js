@@ -126,17 +126,24 @@ function parseHsys(x) {
   return null;
 }
 
-// Modular distance from start -> x in [0..360)
+function isArrayLikeNumeric(a) {
+  return (
+    Array.isArray(a) ||
+    (a && typeof a === "object" && typeof a.length === "number" && a.length >= 0 && (ArrayBuffer.isView(a) || a instanceof Array))
+  );
+}
+
+// Modular distance
 function modDist(start, x) {
   return norm360(x - start);
 }
 
-// House length start->end (mod 360), always positive
+// House length
 function houseLen(start, end) {
   return norm360(end - start);
 }
 
-// Find house index 1..12 for a longitude, using cusp degrees (1..12)
+// Find house index 1..12
 function houseIndexForLon(lon, cusps) {
   const L = norm360(lon);
   for (let i = 1; i <= 12; i++) {
@@ -154,7 +161,7 @@ function houseIndexForLon(lon, cusps) {
   return 12;
 }
 
-// 10%-Regel: wenn im letzten 10% (inkl. Grenze) -> "H/(H+1)"
+// 10%-Regel
 function houseStringWith10pct(lon, cusps) {
   const H = houseIndexForLon(lon, cusps);
   const start = norm360(cusps[H]);
@@ -168,7 +175,7 @@ function houseStringWith10pct(lon, cusps) {
   return `${H}`;
 }
 
-// Ruler mapping, Jungfrau -> Chiron
+// Herrscher (Jungfrau -> Chiron)
 function rulerForSign(signIdx) {
   switch (signIdx) {
     case 0: return "Mars";
@@ -219,76 +226,37 @@ function interceptedSignsByHouse(cuspSigns) {
   return mhSigns;
 }
 
-// --- Robust Extractors (cusps/ascmc können je nach Build anders heissen) ---
+// Robust extractor
 function extractCusps(houseRes) {
-  return (
-    houseRes?.cusps ||
-    houseRes?.cusp ||
-    houseRes?.data?.cusps ||
-    houseRes?.data?.cusp ||
-    null
-  );
+  return houseRes?.cusps || houseRes?.cusp || houseRes?.data?.cusps || houseRes?.data?.cusp || null;
 }
 
 function extractAscmc(houseRes) {
-  return (
-    houseRes?.ascmc ||
-    houseRes?.ascMC ||
-    houseRes?.data?.ascmc ||
-    houseRes?.data?.ascMC ||
-    null
-  );
+  return houseRes?.ascmc || houseRes?.ascMC || houseRes?.data?.ascmc || houseRes?.data?.ascMC || null;
 }
 
-// Placidus-Houses holen (probiert mehrere Signaturen)
-async function getPlacidusHouses(swe, tjd_ut, latV, lonV) {
-  const tries = [
-    { label: 'houses_ex("P")', args: [tjd_ut, swe.SEFLG_SWIEPH, latV, lonV, "P"] },
-    { label: 'houses_ex("P".charCodeAt(0))', args: [tjd_ut, swe.SEFLG_SWIEPH, latV, lonV, "P".charCodeAt(0)] },
-  ];
+// cusps normalisieren auf Index 1..12
+function normalizeCuspsTo13(cuspsRaw) {
+  const arr = Array.from(cuspsRaw);
 
-  let lastDebug = null;
-
-  for (const tr of tries) {
-    try {
-      const houseRes = await swe.houses_ex(...tr.args);
-      const cuspsRaw = extractCusps(houseRes);
-      const ascmcRaw = extractAscmc(houseRes);
-
-      lastDebug = {
-        label: tr.label,
-        type: Array.isArray(houseRes) ? "array" : typeof houseRes,
-        keys: houseRes && !Array.isArray(houseRes) ? Object.keys(houseRes) : null,
-        hasCusps: !!cuspsRaw,
-        cuspsType: Array.isArray(cuspsRaw) ? "array" : typeof cuspsRaw,
-        cuspsLen: Array.isArray(cuspsRaw) ? cuspsRaw.length : null,
-        hasAscmc: !!ascmcRaw,
-        ascmcType: Array.isArray(ascmcRaw) ? "array" : typeof ascmcRaw,
-        ascmcLen: Array.isArray(ascmcRaw) ? ascmcRaw.length : null,
-      };
-
-      if (!cuspsRaw || !Array.isArray(cuspsRaw) || cuspsRaw.length < 13) continue;
-      if (!ascmcRaw || !Array.isArray(ascmcRaw) || ascmcRaw.length < 1) continue;
-
-      const cusps = new Array(13).fill(0);
-      for (let i = 1; i <= 12; i++) cusps[i] = norm360(cuspsRaw[i]);
-
-      const ascLon = norm360(ascmcRaw[0]);
-
-      return { ok: true, cusps, ascLon };
-    } catch (e) {
-      lastDebug = { label: tr.label, thrown: String(e?.message || e) };
-    }
+  // Fall A: 13+ Elemente, Index 1..12 gültig
+  if (arr.length >= 13) {
+    const cusps = new Array(13).fill(0);
+    for (let i = 1; i <= 12; i++) cusps[i] = norm360(arr[i]);
+    return cusps;
   }
 
-  return {
-    ok: false,
-    error: "Häuserberechnung fehlgeschlagen (Placidus: cusps fehlen).",
-    debug: lastDebug,
-  };
+  // Fall B: 12 Elemente, 0..11 entspricht Haus 1..12
+  if (arr.length === 12) {
+    const cusps = new Array(13).fill(0);
+    for (let i = 1; i <= 12; i++) cusps[i] = norm360(arr[i - 1]);
+    return cusps;
+  }
+
+  return null;
 }
 
-// Whole Sign Cusps aus Asc-Zeichen bauen
+// Whole Sign Cusps aus Asc-Zeichen
 function buildWholeSignCuspsFromAsc(ascLon) {
   const ascSign = signIndexFromLon(ascLon);
   const cusps = new Array(13).fill(0);
@@ -338,34 +306,57 @@ export default async function handler(req, res) {
     const swe = new SwissEph();
     await swe.initSwissEph();
 
-    // Lokalzeit -> UT (lokal = UTC + tz)
+    // Lokalzeit -> UT
     const localHour = t.hh + t.mm / 60;
     const utHour = localHour - tzH;
 
     const tjd_ut = swe.julday(d.y, d.mo, d.d, utHour, swe.SE_GREG_CAL);
 
-    // Placidus holen (für Asc und optional für Placidus-Ausgabe)
-    const ph = await getPlacidusHouses(swe, tjd_ut, latV, lonV);
-    if (!ph.ok) {
+    // Immer zuerst Placidus holen (für Asc)
+    const placRes = await swe.houses_ex(tjd_ut, swe.SEFLG_SWIEPH, latV, lonV, "P");
+
+    const placCuspsRaw = extractCusps(placRes);
+    const placAscmcRaw = extractAscmc(placRes);
+
+    if (!isArrayLikeNumeric(placCuspsRaw) || !isArrayLikeNumeric(placAscmcRaw)) {
       return res.status(500).json({
         ok: false,
-        error: ph.error,
-        debug: ph.debug || null,
+        error: "Häuserberechnung fehlgeschlagen (Placidus: cusps/ascmc nicht lesbar).",
+        debug_keys: placRes && !Array.isArray(placRes) ? Object.keys(placRes) : null,
+        debug_hasCusps: !!placCuspsRaw,
+        debug_hasAscmc: !!placAscmcRaw,
+        debug_cusps_type: placCuspsRaw ? (ArrayBuffer.isView(placCuspsRaw) ? "typedArray" : typeof placCuspsRaw) : null,
+        debug_ascmc_type: placAscmcRaw ? (ArrayBuffer.isView(placAscmcRaw) ? "typedArray" : typeof placAscmcRaw) : null,
+        debug_cusps_len: placCuspsRaw?.length ?? null,
+        debug_ascmc_len: placAscmcRaw?.length ?? null,
       });
     }
 
-    // Output-Cusps je nach System
-    const cusps = (h === "P") ? ph.cusps : buildWholeSignCuspsFromAsc(ph.ascLon);
+    const placCusps = normalizeCuspsTo13(placCuspsRaw);
+    if (!placCusps) {
+      return res.status(500).json({
+        ok: false,
+        error: "Häuserberechnung fehlgeschlagen (Placidus: cusps Länge unerwartet).",
+        debug_cusps_len: placCuspsRaw.length,
+      });
+    }
+
+    const ascmcArr = Array.from(placAscmcRaw);
+    const ascLon = norm360(ascmcArr[0]);
+
+    // Output cusps je nach hsys
+    const cusps =
+      h === "P"
+        ? placCusps
+        : buildWholeSignCuspsFromAsc(ascLon);
 
     // Cusp signs
     const cuspSigns = new Array(13).fill(0);
-    for (let i = 1; i <= 12; i++) {
-      cuspSigns[i] = signIndexFromLon(cusps[i]);
-    }
+    for (let i = 1; i <= 12; i++) cuspSigns[i] = signIndexFromLon(cusps[i]);
 
     // Intercepted signs nur bei Placidus
     const mhSignsByHouse =
-      (h === "P") ? interceptedSignsByHouse(cuspSigns) : Array.from({ length: 13 }, () => []);
+      h === "P" ? interceptedSignsByHouse(cuspSigns) : Array.from({ length: 13 }, () => []);
 
     // benötigte Planeten
     const neededPlanetNames = new Set();
