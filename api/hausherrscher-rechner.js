@@ -271,14 +271,17 @@ export default async function handler(req, res) {
 
     const tjd_ut = swe.julday(d.y, d.mo, d.d, utHour, swe.SE_GREG_CAL);
 
-    // Houses (swisseph-wasm liefert hier ein Objekt mit keys: { cusps, ascmc })
-    const houseRes = await swe.houses_ex(
-      tjd_ut,
-      swe.SEFLG_SWIEPH,
-      latV,
-      lonV,
-      h
-    );
+   // Houses (swisseph-wasm liefert hier ein Objekt mit keys: { cusps, ascmc })
+// hsys als ASCII-Code übergeben (SwissEph erwartet Zahl)
+const hsysCode = h.charCodeAt(0);
+
+const houseRes = await swe.houses_ex(
+  tjd_ut,
+  swe.SEFLG_SWIEPH,
+  latV,
+  lonV,
+  hsysCode
+);
 
     const cusp = houseRes?.cusps || null;
     if (!cusp || !Array.isArray(cusp) || cusp.length < 13) {
